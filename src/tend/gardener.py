@@ -1,9 +1,6 @@
 """The identity gardener (SPEC §9): finds Items that may be one thing recorded twice, asks a judge,
-merges through the identity map, and rebuilds once (deviation D2).
-
-Ordering borrows SENATOR's structural entropy (arXiv 2505.07184): each Item's degree is its
-uncertainty mass, the summed self-information of the resolutions that placed claims on it, so judge
-calls go where the store's identity is least certain."""
+and merges through the identity map (deviation D2). Within equal scores, pairs holding more best
+readings are judged first."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -24,24 +21,17 @@ class Pair:
     b: str
     score: float
     rule: str
-    mass: float = 0.0
+    mass: int = 0
 
 
-def uncertainty(ledger: Ledger) -> dict[str, float]:
-    """d_u = Σ −log2 q over the active claims whose subject is u."""
-    d: dict[str, float] = {}
+def doubt(ledger: Ledger) -> dict[str, int]:
+    """Number of best readings (`low_confidence` claims) on each Item."""
+    d: dict[str, int] = {}
     for c in ledger.active_claims():
-        u = ledger.root(c.subject_id)
-        d[u] = d.get(u, 0.0) + confidence.self_information(c.confidence)
+        if "low_confidence" in c.flags:
+            u = ledger.root(c.subject_id)
+            d[u] = d.get(u, 0) + 1
     return d
-
-
-def uncertainty_entropy(ledger: Ledger) -> tuple[float, float]:
-    """(total uncertainty mass, SENATOR's H¹ over the Items' masses). The total says how much doubt
-    the store holds; H¹ says how evenly it is spread (0 when there is none, and also when one Item
-    holds all of it). Neither drives a decision; the queue and the gardener use the masses."""
-    d = uncertainty(ledger)
-    return sum(d.values()), confidence.structural_entropy(d)
 
 
 def detect(ledger: Ledger, cfg: Config) -> list[Pair]:
@@ -86,7 +76,7 @@ def detect(ledger: Ledger, cfg: Config) -> list[Pair]:
         if winner and others and ledger.item(others[0]):
             offer(winner, others[0], 0.5, "low_confidence")
 
-    mass = uncertainty(ledger)
+    mass = doubt(ledger)
     out = list(pairs.values())
     for p in out:
         p.mass = mass.get(p.a, 0.0) + mass.get(p.b, 0.0)

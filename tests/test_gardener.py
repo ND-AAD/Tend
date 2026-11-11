@@ -46,7 +46,7 @@ def test_judge_says_different(app):
 def test_uncertainty_mass(app):
     ex = fakes.Extractor({"m1": [_commit()]})
     app.mail(ex, fakes.Resolver(fakes.by_name)).ingest(_ask())
-    assert gardener.uncertainty_entropy(app.ledger) == (0.0, 0.0)     # one Item, no uncertainty
+    assert gardener.doubt(app.ledger) == {}     # a confident claim is not a best reading
 
 
 def test_shared_correspondent_is_not_identity_and_verdicts_are_remembered(app):

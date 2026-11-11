@@ -21,8 +21,9 @@ Attedra references it relies on.
 - **Mail** (`ingest_mail.py`, `pack.py`, `llm.py`, `confidence.py`, `deadlines.py`): Claude
   proposes claims and resolves references against a context pack; code audits every proposal and
   decides whether a resolution is confident enough to write, using vote entropy weighted by
-  structural support (adapted from SENATOR, arXiv 2505.07184). Uncertain resolutions are held, then
-  written with a `low_confidence` flag after 72 hours. You are never asked what is what.
+  structural support. An uncertain resolution is written at once as a flagged best reading, shown
+  as "my best reading", and re-checked by later messages and a nightly review queue that rewrites
+  it when the answer changes. You are never asked what is what.
 - **Gardener** (`gardener.py`): finds Items that may be one thing, asks a judge, merges, rebuilds.
 - **Morning list** (`brief.py`): the `what_remains` read, grouped and grounded.
 

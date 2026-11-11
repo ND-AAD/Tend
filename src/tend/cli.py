@@ -53,8 +53,7 @@ def main(argv: list[str] | None = None) -> None:
             for s, b, why in gardener.run(app.ledger, cfg, app.projector, judge):
                 print(f"merged {b} into {s}: {why}")
             print("rebuilt:", app.projector.refresh())
-            total, h1 = gardener.uncertainty_entropy(app.ledger)
-            print(f"uncertainty mass {total:.2f} bits, spread H1 {h1:.3f}")
+            print("best readings outstanding:", sum(gardener.doubt(app.ledger).values()))
         elif cmd == "rebuild":
             print(app.projector.rebuild("owner", "requested from the command line"))
         elif cmd == "brief":

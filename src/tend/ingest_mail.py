@@ -337,8 +337,7 @@ class MailIngest:
         return done
 
     def review_queue(self, limit: int = 20) -> list[str]:
-        """The self-correction queue (SPEC §8.4), most uncertain first by self-information
-        I = -log2 q (SENATOR Eq. 1). A claim enters when it is a best reading (`low_confidence`),
+        """The self-correction queue (SPEC §8.4), lowest confidence first. A claim enters when it is a best reading (`low_confidence`),
         or when the name it was resolved by is now recorded on more than one Item of its kind,
         which is how a confident pick later becomes doubtful."""
         ambiguous = {r[0] for r in self.ledger._q(
@@ -351,7 +350,7 @@ class MailIngest:
             names = {r[0] for r in self.ledger._q(
                 "SELECT name_norm FROM ledger.names WHERE message_id=%s AND item_id=%s", (c.message_id, c.subject_id))}
             if "low_confidence" in c.flags or names & ambiguous:
-                out.append((-confidence.self_information(c.confidence) if c.confidence > 0 else -99.0, c.id))
+                out.append((c.confidence, c.id))
         return [cid for _, cid in sorted(out)[:limit]]
 
     def review(self, limit: int = 20) -> list[str]:

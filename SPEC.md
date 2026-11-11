@@ -190,8 +190,6 @@ H   = −Σ q_i log2 q_i / log2 n,              n = number of options with p > 0
 
 Write when H ≤ 0.35 and either the winner is `new` or its s > 0. Otherwise hold.
 
-What this owes to SENATOR, stated plainly: the write rule is self-consistency voting with a structural prior, which is not in the paper. SENATOR's self-information (Eq. 1) and weighted degree (Eq. 2) do real work elsewhere: they order the review queue (§8.4) and the gardener (§9). Its structural entropy (Eq. 3) is reported, not used.
-
 Implementation rules that the formula leaves open:
 
 - Candidates are the pack's Items of the mention's audited kind only, so a property is never written on an Item whose vocabulary lacks it.
@@ -251,7 +249,7 @@ An owner act's `target` is a key: `{"claim": <claim id>}` for an expectation. At
 Triggers:
 
 1. A new message in the thread of an open hold (§7.3).
-2. The review queue, run nightly (`review(limit=20)`): every active mail claim that is a best reading, or whose resolving name is now recorded on more than one active Item of its kind (how a confident pick becomes doubtful), ordered by self-information I = −log2 q, highest first (SENATOR Eq. 1).
+2. The review queue, run nightly (`review(limit=20)`): every active mail claim that is a best reading, or whose resolving name is now recorded on more than one active Item of its kind (how a confident pick becomes doubtful), ordered by confidence q, lowest first.
 3. The gardener's merges (§9).
 
 The nightly batch is: `release_holds`, `review`, gardener `run`, then one `refresh`.
@@ -264,7 +262,7 @@ The nightly batch is: `release_holds`, `review`, gardener `run`, then one `refre
 2. Neighbourhood Jaccard ≥ 0.6 over two-hop neighbours (score = the Jaccard), only for pairs whose recorded names or labels share a word other than articles and words such as "revised". Sharing a correspondent alone makes every Item from that person a neighbour of every other, so it is not evidence of identity.
 3. Each best reading (`uncertain_write`, `hold_released` revisions), as the pair (its subject, its runner-up option) (score 0.5).
 
-Pairs are then ordered within equal scores by uncertainty mass, SENATOR's weighted degree (arXiv 2505.07184, Eq. 2) applied to resolutions. Each active claim gives its subject the self-information I = −log2 q of its winning resolution (q from §7.2; 0 for code-settled mentions). An Item's uncertainty is d_u = Σ I over its claims, and a pair's mass is d_a + d_b. The gardener therefore spends its judge calls where the store's identity is least certain. `uncertainty_entropy()` reports the total mass vol and SENATOR's H¹ = −Σ (d_u / vol) log2 (d_u / vol). H¹ measures how evenly doubt is spread, not how much there is: it is 0 both when nothing is uncertain and when one Item holds all the doubt. Neither number drives a decision.
+Pairs with equal scores are ordered by the number of best readings (`low_confidence` claims) on the two Items, most first, so judge calls go where the store's identity is least certain.
 
 `run(judge, limit=10)` asks `judge.same(a, b, evidence)` for the top pairs. On `same`, it merges into the older Item (smaller `created_at`, then smaller id), with the judge's reason. A pair judged different is not asked again until the two Items' claim count changes (revision `judged` records it). Merges mark the store stale; the batch `refresh` applies them.
 

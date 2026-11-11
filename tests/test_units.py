@@ -52,7 +52,6 @@ def test_support_and_entropy():
     edges = {"x": {"t"}, "t": {"x", "p"}, "p": {"t"}}
     assert confidence.support(edges, "x", {"t", "p"}) == 1.0
     assert confidence.support(edges, "y", {"t"}) == 0.0
-    assert confidence.structural_entropy({"a": 1, "b": 1}) == 1.0
 
 
 def test_minority_never_wins():
