@@ -40,6 +40,10 @@ CREATE TABLE IF NOT EXISTS ledger.owner_acts (
 CREATE TABLE IF NOT EXISTS ledger.revisions (
     id bigserial PRIMARY KEY, at timestamptz NOT NULL DEFAULT clock_timestamp(), agent text NOT NULL,
     action text NOT NULL, reason text, detail jsonb NOT NULL DEFAULT '{}');
+-- `via`: the absorbed Item a merge copied this row from (NULL for the Item's own rows), so that
+-- unmerge() removes exactly what the merge added
+ALTER TABLE ledger.names ADD COLUMN IF NOT EXISTS via text;
+ALTER TABLE ledger.links ADD COLUMN IF NOT EXISTS via text;
 """
 
 _ARTICLES = re.compile(r"^(the|a|an|our|my)\s+")
@@ -130,18 +134,25 @@ class Ledger:
         return [dict(zip(("id", "kind", "label", "keys", "created_at"), r)) for r in self._q(sql + " ORDER BY id", args)]
 
     def items_by_key(self, key: str) -> list[str]:
-        return [r[0] for r in self._q(
-            "SELECT id FROM ledger.items WHERE merged_into IS NULL AND keys ? %s ORDER BY id", (key.lower(),))]
+        """The roots of the Items carrying an exact key. Keys stay on the Item that was given them,
+        so a merge needs no key bookkeeping and an unmerge none to undo."""
+        out: list[str] = []
+        for (i,) in self._q("SELECT id FROM ledger.items WHERE keys ? %s ORDER BY id", (key.lower(),)):
+            r = self.root(i)
+            if r not in out:
+                out.append(r)
+        return out
 
     def add_name(self, item_id: str, name: str, message_id: str, stream_id: str | None) -> None:
         n = normalise(name)
         if n:
-            self._q("INSERT INTO ledger.names VALUES (%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING",
-                    (item_id, n, name, message_id, stream_id))
+            self._q("INSERT INTO ledger.names (item_id, name_norm, name, message_id, stream_id) "
+                    "VALUES (%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING", (item_id, n, name, message_id, stream_id))
 
-    def names_of(self, item_id: str) -> list[str]:
+    def names_of(self, item_id: str, except_message: str | None = None) -> list[str]:
         return [r[0] for r in self._q(
-            "SELECT DISTINCT name_norm FROM ledger.names WHERE item_id=%s ORDER BY name_norm", (item_id,))]
+            "SELECT DISTINCT name_norm FROM ledger.names WHERE item_id=%s AND message_id IS DISTINCT FROM %s "
+            "ORDER BY name_norm", (item_id, except_message))]
 
     def items_named(self, name_norm: str, kind: str | None = None) -> list[str]:
         sql = ("SELECT DISTINCT n.item_id FROM ledger.names n JOIN ledger.items i ON i.id=n.item_id "
@@ -156,8 +167,9 @@ class Ledger:
         return self._q("SELECT DISTINCT n.item_id, n.name_norm FROM ledger.names n JOIN ledger.items i "
                        "ON i.id=n.item_id WHERE i.merged_into IS NULL")
 
-    def link(self, from_id: str, to_id: str, at: str) -> None:
-        self._q("INSERT INTO ledger.links VALUES (%s,%s,%s) ON CONFLICT DO NOTHING", (from_id, to_id, at))
+    def link(self, from_id: str, to_id: str, at: str, via: str | None = None) -> None:
+        self._q("INSERT INTO ledger.links (from_id, to_id, at, via) VALUES (%s,%s,%s,%s) ON CONFLICT DO NOTHING",
+                (from_id, to_id, at, via))
 
     def links_from(self, from_id: str) -> list[str]:
         return [r[0] for r in self._q("SELECT to_id FROM ledger.links WHERE from_id=%s ORDER BY 1", (from_id,))]
@@ -290,16 +302,65 @@ class Ledger:
         if survivor == absorbed:
             return
         self._q("UPDATE ledger.items SET merged_into=%s WHERE id=%s", (survivor, absorbed))
-        a, s = self.item(absorbed), self.item(survivor)
-        keys = sorted(set(s["keys"]) | set(a["keys"]))
-        self._q("UPDATE ledger.items SET keys=%s WHERE id=%s", (Jsonb(keys), survivor))
-        self._q("INSERT INTO ledger.names SELECT %s, name_norm, name, message_id, stream_id FROM ledger.names "
-                "WHERE item_id=%s ON CONFLICT DO NOTHING", (survivor, absorbed))
-        for f, t, at in self._q("SELECT from_id, to_id, at FROM ledger.links WHERE from_id=%s OR to_id=%s",
-                                (absorbed, absorbed)):
-            self.link(survivor if f == absorbed else f, survivor if t == absorbed else t, at)
+        self._q("INSERT INTO ledger.names (item_id, name_norm, name, message_id, stream_id, via) "
+                "SELECT %s, name_norm, name, message_id, stream_id, coalesce(via, %s) FROM ledger.names "
+                "WHERE item_id=%s ON CONFLICT DO NOTHING", (survivor, absorbed, absorbed))
+        for f, t, at, via in self._q("SELECT from_id, to_id, at, via FROM ledger.links WHERE from_id=%s OR to_id=%s",
+                                     (absorbed, absorbed)):
+            self.link(survivor if f == absorbed else f, survivor if t == absorbed else t, at, via or absorbed)
         self.log(agent, "merge_items", reason, survivor=survivor, absorbed=absorbed)
         self.mark_stale(f"{absorbed} merged into {survivor}")
+
+    def unmerge(self, item_id: str, agent: str, reason: str) -> bool:
+        """Undo the merge that absorbed `item_id` (SPEC §9.3): it becomes a root again with the
+        Items merged into it, and the names and links the merges copied upward are removed from
+        every Item above it. Returns False when it was not merged."""
+        it = self.item(item_id)
+        if not it or not it["merged_into"]:
+            return False
+        above, x = [], it["merged_into"]
+        while x and x not in above:
+            above.append(x)
+            x = (self.item(x) or {}).get("merged_into")
+        below, frontier = {item_id}, {item_id}
+        while frontier:
+            frontier = {r[0] for r in self._q("SELECT id FROM ledger.items WHERE merged_into = ANY(%s)",
+                                              (list(frontier),))} - below
+            below |= frontier
+        self._q("UPDATE ledger.items SET merged_into=NULL WHERE id=%s", (item_id,))
+        self._q("DELETE FROM ledger.names WHERE item_id = ANY(%s) AND via = ANY(%s)", (above, list(below)))
+        self._q("DELETE FROM ledger.links WHERE via = ANY(%s) AND (from_id = ANY(%s) OR to_id = ANY(%s))",
+                (list(below), above, above))
+        self.log(agent, "unmerge_items", reason, item=item_id, was_merged_into=it["merged_into"])
+        self.mark_stale(f"{item_id} unmerged from {it['merged_into']}")
+        return True
+
+    def evidence_of(self, item_id: str) -> bool:
+        """Whether anything records the Item: an active claim, a name or a link, on it or on an
+        Item merged into it."""
+        ids_ = [r[0] for r in self._q("SELECT id FROM ledger.items") if self.root(r[0]) == item_id] or [item_id]
+        return bool(self._q("SELECT 1 FROM ledger.claims WHERE status='active' AND subject_id = ANY(%s) LIMIT 1", (ids_,))
+                    or self._q("SELECT 1 FROM ledger.names WHERE item_id = ANY(%s) LIMIT 1", (ids_,))
+                    or self._q("SELECT 1 FROM ledger.links WHERE to_id = ANY(%s) LIMIT 1", (ids_,)))
+
+    def hide_footprint(self, c: Claim) -> None:
+        """Remove, inside a transaction the caller rolls back, what placing `c` added to the
+        nomenclature and structure: the claim itself, the names its message recorded on its
+        subject, and the thread's link to the subject when no other active claim from the thread
+        is about it. A re-resolution run under it sees the store as if `c` had not been placed."""
+        msg = self.message(c.message_id)
+        on = [c.subject_id, self.root(c.subject_id)]
+        self._q("UPDATE ledger.claims SET status='hidden' WHERE id=%s", (c.id,))
+        others = self._q("SELECT 1 FROM ledger.claims WHERE status='active' AND message_id=%s AND subject_id = ANY(%s)",
+                         (c.message_id, on))
+        if not others:
+            self._q("DELETE FROM ledger.names WHERE message_id=%s AND item_id = ANY(%s)", (c.message_id, on))
+        thread = msg and msg["thread_id"]
+        if thread:
+            rest = self._q("SELECT 1 FROM ledger.claims k JOIN ledger.messages m ON m.id=k.message_id "
+                           "WHERE k.status='active' AND m.thread_id=%s AND k.subject_id = ANY(%s)", (thread, on))
+            if not rest:
+                self._q("DELETE FROM ledger.links WHERE from_id=%s AND to_id = ANY(%s)", (thread, on))
 
     # -- the graph used for structural support and the gardener (SPEC §7.2, §9) ----------------
     def message_claims(self) -> list[tuple[Claim, dict]]:

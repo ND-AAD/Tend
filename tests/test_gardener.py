@@ -43,7 +43,7 @@ def test_judge_says_different(app):
     assert app.ledger.revisions("judged")
 
 
-def test_uncertainty_mass(app):
+def test_doubt_counts_only_best_readings(app):
     ex = fakes.Extractor({"m1": [_commit()]})
     app.mail(ex, fakes.Resolver(fakes.by_name)).ingest(_ask())
     assert gardener.doubt(app.ledger) == {}     # a confident claim is not a best reading

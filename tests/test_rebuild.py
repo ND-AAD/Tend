@@ -74,9 +74,9 @@ def test_failed_rebuild_keeps_projection(app, monkeypatch):
     _seed(app)
     before, schema = snapshot(app), app.ledger.meta("projection_schema")
 
-    def boom(_id):
-        raise WriteError("occupied", "forced")
-    monkeypatch.setattr(app.projector, "project_message", boom)
+    def boom():
+        raise WriteError("occupied", "forced")       # a failure no record can be blamed for
+    monkeypatch.setattr(app.projector, "_fixed", boom)
     with pytest.raises(RebuildFailed):
         app.projector.rebuild("test")
     assert app.ledger.meta("projection_schema") == schema
@@ -91,9 +91,9 @@ def test_any_rebuild_failure_restores(app, monkeypatch):
     _seed(app)
     before = snapshot(app)
 
-    def boom(_id):
+    def boom():
         raise ValueError("not a WriteError")
-    monkeypatch.setattr(app.projector, "project_message", boom)
+    monkeypatch.setattr(app.projector, "_fixed", boom)
     with pytest.raises(RebuildFailed):
         app.projector.rebuild("test")
     monkeypatch.undo()

@@ -7,7 +7,7 @@ from . import brief, ids
 from .config import Config
 from .ingest_mail import MailIngest
 from .ledger import Ledger
-from .projector import Projector
+from .projector import Projector, RebuildFailed
 
 
 class App:
@@ -28,9 +28,21 @@ class App:
 
     def brief(self, cutoff: str = "now") -> brief.Brief:
         """The morning list. Pending corrections, merges and out-of-order arrivals are applied by
-        one rebuild first, so the list never shows a reading the assistant has already revised."""
-        self.projector.refresh()
-        return brief.build(self.session, self.ledger, self.cfg, cutoff)
+        one rebuild first, so the list never shows a reading the assistant has already revised.
+        If that rebuild fails the list is still served, from the previous projection, and says so."""
+        warning = None
+        try:
+            self.projector.refresh()
+        except RebuildFailed as e:
+            warning = f"this list may be out of date: the store could not be rebuilt ({str(e)[:120]})"
+        b = brief.build(self.session, self.ledger, self.cfg, cutoff)
+        if warning:
+            b.notices.insert(0, warning)
+        for rid in self.projector.quarantined():
+            m = self.ledger.message(rid)
+            who = f"a message from {m['producer_id'].split(':', 1)[-1]} on {m['sent_at'][:10]}" if m else f"record {rid}"
+            b.notices.append(f"{who} could not be recorded and is set aside; nothing from it is on this list")
+        return b
 
     def owner_act(self, kind: str, claim_id: str, at: str, until: str | None = None,
                   note: str | None = None) -> str:

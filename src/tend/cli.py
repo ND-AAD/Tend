@@ -55,6 +55,8 @@ def main(argv: list[str] | None = None) -> None:
             print("rebuilt:", app.projector.refresh())
             print("best readings outstanding:", sum(gardener.doubt(app.ledger).values()))
         elif cmd == "rebuild":
+            # an explicit rebuild retries anything set aside
+            print("retrying:", app.projector.release_quarantine())
             print(app.projector.rebuild("owner", "requested from the command line"))
         elif cmd == "brief":
             print(app.brief(args[0] if args else "now").render())

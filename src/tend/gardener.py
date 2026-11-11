@@ -3,16 +3,18 @@ and merges through the identity map (deviation D2). Within equal scores, pairs h
 readings are judged first."""
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from itertools import combinations
 
-from . import confidence
+from . import confidence, ids
 from .config import Config
 from .ledger import Ledger, normalise
 from .llm import Judge
 from .schema import RESOLVABLE_KINDS
 
 JACCARD_MIN = 0.6
+RARE_MAX = 2      # a word is evidence of identity only if at most this many Items of the kind carry it
 
 
 @dataclass
@@ -21,7 +23,7 @@ class Pair:
     b: str
     score: float
     rule: str
-    mass: int = 0
+    doubt: int = 0      # best readings held by the two Items; orders pairs of equal score
 
 
 def doubt(ledger: Ledger) -> dict[str, int]:
@@ -59,9 +61,15 @@ def detect(ledger: Ledger, cfg: Config) -> list[Pair]:
     items = [i["id"] for i in ledger.active_items() if i["kind"] in RESOLVABLE_KINDS]
     hood = {i: confidence.neighbours(edges, i) for i in items}
     words = {i: _words(ledger, i) for i in items}
+    kind_of = {i["id"]: i["kind"] for i in ledger.active_items()}
+    carriers: dict[tuple[str, str], int] = {}
+    for i in items:
+        for w in words[i]:
+            carriers[(kind_of[i], w)] = carriers.get((kind_of[i], w), 0) + 1
     for a, b in combinations(items, 2):
-        if not words[a] & words[b]:
-            continue     # sharing a correspondent is not evidence of identity without a shared word
+        shared = {w for w in words[a] & words[b] if carriers[(kind_of[a], w)] <= RARE_MAX}
+        if not shared:
+            continue     # a correspondent plus a common word (a client's name) is not evidence of identity
         na, nb = hood[a] - {b}, hood[b] - {a}
         if na and nb:
             j = len(na & nb) / len(na | nb)
@@ -76,11 +84,11 @@ def detect(ledger: Ledger, cfg: Config) -> list[Pair]:
         if winner and others and ledger.item(others[0]):
             offer(winner, others[0], 0.5, "low_confidence")
 
-    mass = doubt(ledger)
+    held = doubt(ledger)
     out = list(pairs.values())
     for p in out:
-        p.mass = mass.get(p.a, 0.0) + mass.get(p.b, 0.0)
-    out.sort(key=lambda p: (-p.score, -p.mass, p.a, p.b))
+        p.doubt = held.get(p.a, 0) + held.get(p.b, 0)
+    out.sort(key=lambda p: (-p.score, -p.doubt, p.a, p.b))
     return out
 
 
@@ -93,18 +101,31 @@ def _words(ledger: Ledger, item_id: str) -> set[str]:
     return {w for n in names for w in n.split()} - _STOP
 
 
-def _judged(ledger: Ledger) -> dict[tuple[str, str], int]:
-    """Pairs already judged different, with the evidence count they were judged on."""
-    out: dict[tuple[str, str], int] = {}
+def _judged(ledger: Ledger) -> dict[tuple[str, str], str]:
+    """Pairs judged different, with the signature of the evidence they were judged on."""
+    out: dict[tuple[str, str], str] = {}
     for r in ledger.revisions("judged"):
         d = r["detail"]
-        if not d.get("same"):
-            out[tuple(sorted((d["a"], d["b"])))] = d.get("claims", 0)
+        key = tuple(sorted((d["a"], d["b"])))
+        if d.get("same"):
+            out.pop(key, None)
+        else:
+            out[key] = d.get("signature", "")
     return out
 
 
-def _claim_count(ledger: Ledger, a: str, b: str) -> int:
-    return sum(1 for c in ledger.active_claims() if ledger.root(c.subject_id) in (a, b))
+def signature(ledger: Ledger, cfg: Config, a: str, b: str) -> str:
+    """What a judgement of a and b rests on: their names and their neighbourhoods. Another claim
+    that adds neither leaves it unchanged, so the pair is not asked about again."""
+    edges = ledger.graph(exclude={cfg.owner_id})
+    a, b = sorted((a, b))
+    data = [[ledger.names_of(x), sorted(confidence.neighbours(edges, x) - {a, b})] for x in (a, b)]
+    return ids._h(json.dumps(data, sort_keys=True))
+
+
+def remember_different(ledger: Ledger, cfg: Config, a: str, b: str, agent: str, reason: str) -> None:
+    ledger.log(agent, "judged", reason, a=a, b=b, same=False, rule="unmerge", score=0.0,
+               signature=signature(ledger, cfg, a, b))
 
 
 def _evidence(ledger: Ledger, item_id: str) -> dict:
@@ -116,7 +137,8 @@ def _evidence(ledger: Ledger, item_id: str) -> dict:
 
 
 def run(ledger: Ledger, cfg: Config, projector, judge: Judge, limit: int = 10) -> list[tuple[str, str, str]]:
-    """Judge the top pairs; merge each `same` pair into the older Item; rebuild once."""
+    """Judge the top pairs and merge each `same` pair into the older Item. The rebuild that
+    applies the merges is the caller's (the nightly batch, or the next list)."""
     merged = []
     judged = _judged(ledger)
     asked = 0
@@ -126,13 +148,13 @@ def run(ledger: Ledger, cfg: Config, projector, judge: Judge, limit: int = 10) -
         a, b = ledger.root(p.a), ledger.root(p.b)
         if a == b:
             continue
-        n = _claim_count(ledger, a, b)
-        if judged.get(tuple(sorted((a, b)))) == n:
-            continue     # judged different on this same evidence: ask again only when it grows
+        sig = signature(ledger, cfg, a, b)
+        if judged.get(tuple(sorted((a, b)))) == sig:
+            continue     # judged different on this same evidence: ask again only when it changes
         asked += 1
         same, reason = judge.same(_evidence(ledger, a), _evidence(ledger, b), {"rule": p.rule, "score": p.score})
-        ledger.log("gardener", "judged", reason, a=a, b=b, same=same, rule=p.rule, score=p.score, mass=p.mass,
-                   claims=n)
+        ledger.log("gardener", "judged", reason, a=a, b=b, same=same, rule=p.rule, score=p.score, doubt=p.doubt,
+                   signature=sig)
         if not same:
             continue
         ages = {r[0]: r[1] for r in ledger._q("SELECT id, created_at FROM ledger.items WHERE id = ANY(%s)", ([a, b],))}

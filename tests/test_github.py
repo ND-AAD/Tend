@@ -133,4 +133,4 @@ def test_quiet_work_is_marked_not_overdue(app):
     lines = app.brief("2026-11-11T09:00:00+00:00").lines
     assert [(l.section, l.text) for l in lines] == [
         ("Your commitments", "Merge or close: Add ledger (attedra#8), untouched for 27 days")]
-    assert brief.QUIET_RULE == "quiet-v1" and brief.QUIET_DAYS == 7
+    assert brief.QUIET_RULE == "quiet-v2" and brief.QUIET_DAYS == 7

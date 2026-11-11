@@ -31,7 +31,12 @@ def aref(item: str, context: str, source: str, prop: str | None = None) -> dict:
 
 
 class RebuildFailed(Exception):
-    pass
+    def __init__(self, message: str, culprit: str | None = None) -> None:
+        super().__init__(message)
+        self.culprit = culprit       # the ledger message or owner act being replayed, if any
+
+
+MAX_QUARANTINE = 5     # records one rebuild may set aside before it gives up
 
 
 class Projector:
@@ -40,6 +45,7 @@ class Projector:
         self.ledger = ledger
         self.config = config
         self.session = Session(conn)
+        self._current: str | None = None
         schema = ledger.meta("projection_schema")
         if schema:
             self._use(schema)
@@ -218,11 +224,45 @@ class Projector:
             return self.rebuild(agent, self.ledger.meta("stale_reason") or "stale")
         return None
 
+    # -- quarantine (SPEC §8.2) ----------------------------------------------------------------
+    def quarantined(self) -> dict[str, str]:
+        """Ledger records a rebuild set aside because they could not be projected, with why."""
+        return json.loads(self.ledger.meta("quarantine") or "{}")
+
+    def quarantine(self, record_id: str, why: str, agent: str = "tend") -> None:
+        q = self.quarantined()
+        q[record_id] = why[:500]
+        self.ledger.set_meta("quarantine", json.dumps(q, sort_keys=True))
+        self.ledger.log(agent, "quarantined", why[:2000], record=record_id)
+
+    def release_quarantine(self, agent: str = "owner") -> list[str]:
+        """Try the set-aside records again at the next rebuild (after a fix)."""
+        q = list(self.quarantined())
+        if q:
+            self.ledger.set_meta("quarantine", "{}")
+            self.ledger.mark_stale("quarantine released")
+            self.ledger.log(agent, "quarantine_released", None, records=q)
+        return q
+
     # -- rebuild (SPEC §8.2) -------------------------------------------------------------------
     def rebuild(self, agent: str = "tend", reason: str = "") -> str:
+        """Invariant: one record that cannot be projected costs that record, never the list. A
+        replay that fails on a message or owner act sets it aside (quarantine, shown on the list)
+        and tries again; any other failure keeps the previous projection in use."""
+        for attempt in range(MAX_QUARANTINE + 1):
+            try:
+                return self._rebuild_once(agent, reason)
+            except RebuildFailed as e:
+                if e.culprit is None or attempt == MAX_QUARANTINE:
+                    raise
+                self.quarantine(e.culprit, str(e), agent)
+        raise AssertionError("unreachable")
+
+    def _rebuild_once(self, agent: str, reason: str) -> str:
         old = self.ledger.meta("projection_schema")
         n = int(old.split("_")[1]) + 1 if old else 1
         new = f"proj_{n}"
+        self._current = None
         try:
             self._create(new)
             self._replay()
@@ -230,12 +270,13 @@ class Projector:
             if check.get("differences"):
                 raise RebuildFailed(json.dumps(check["differences"])[:2000])
         except Exception as e:          # any failure: the previous projection stays in use
+            culprit = self._current
             with self.conn.cursor() as c:
                 c.execute(f'DROP SCHEMA IF EXISTS "{new}" CASCADE')
             if old:
                 self._use(old)
-            self.ledger.log(agent, "rebuild_failed", f"{type(e).__name__}: {e}"[:2000], schema=new)
-            raise RebuildFailed(str(e)) from e
+            self.ledger.log(agent, "rebuild_failed", f"{type(e).__name__}: {e}"[:2000], schema=new, record=culprit)
+            raise RebuildFailed(str(e), culprit) from e
         self.ledger.set_meta("projection_schema", new)
         self.ledger.set_meta("stale", "0")
         self.ledger.set_meta("stale_reason", "")
@@ -246,14 +287,19 @@ class Projector:
         return new
 
     def _replay(self) -> None:
+        skip = self.quarantined()
         events: list[tuple] = []
         for m in self.ledger.messages():
             events.append((instants.sort_key(m["sent_at"]), 0, m["id"], m))
         for a in self.ledger.owner_acts():
             events.append((instants.sort_key(a["at"]), 1, a["id"], a))
-        for _, kind, _, x in sorted(events, key=lambda e: e[:3]):
+        for _, kind, rid, x in sorted(events, key=lambda e: e[:3]):
+            if rid in skip:
+                continue
+            self._current = rid
             if kind == 0:
                 self.project_message(x["id"])
                 self.ledger.set_meta("latest_sent_at", x["sent_at"])
             else:
                 self.project_owner_act(x)
+        self._current = None
