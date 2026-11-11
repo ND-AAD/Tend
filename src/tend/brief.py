@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from . import ids, schema
+from . import ids, instants, schema
 from .config import Config
 from .ledger import Ledger
 
@@ -37,6 +37,32 @@ class Brief:
         if len(out) == 1:
             out.append("\nNothing open.")
         return "\n".join(out)
+
+
+# Quiet rule: a line is marked "untouched for N days" when no message has carried a claim about its
+# subject for QUIET_DAYS. Derived at read time from the ledger, never written as a deadline.
+QUIET_RULE = "quiet-v1"
+QUIET_DAYS = 7
+
+
+def last_activity(ledger: Ledger, subject: str, cutoff: str) -> str | None:
+    """The latest message instant, not after the cutoff, carrying an active claim on the subject."""
+    root = ledger.root(subject)
+    end = instants.parse(cutoff)[1]
+    best = None
+    for c, m in ledger.message_claims():
+        if ledger.root(c.subject_id) == root and instants.parse(m["sent_at"])[0] < end:
+            if best is None or instants.sort_key(m["sent_at"]) > instants.sort_key(best):
+                best = m["sent_at"]
+    return best
+
+
+def quiet_days(ledger: Ledger, subject: str, cutoff: str) -> int | None:
+    last = last_activity(ledger, subject, cutoff)
+    if last is None:
+        return None
+    days = (instants.parse(cutoff)[0] - instants.parse(last)[0]).days
+    return days if days >= QUIET_DAYS else None
 
 
 SECTIONS = ("Overdue", "Your commitments", "Waiting on others", "Coming up")
@@ -91,6 +117,9 @@ def build(session, ledger: Ledger, cfg: Config, cutoff: str = "now") -> Brief:
             text += f", asked by {_person(ledger, c.party_id, cfg)}" if c.party_id != cfg.owner_id else ""
         else:
             text += f", owed by {_person(ledger, c.obligated_id, cfg)}"
+        quiet = quiet_days(ledger, subject, brief.cutoff)
+        if quiet is not None:
+            text += f", untouched for {quiet} days"
         if "low_confidence" in (c.flags or []):
             text += " (my best reading)"
         if upcoming:

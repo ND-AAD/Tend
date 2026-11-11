@@ -121,3 +121,16 @@ def test_open_prs_of_yours_wait_on_you(app):
                                        author="nd-aad"))
     _ing(app, "pull_request", pr_event("closed", n=9, at="2026-11-11T12:00:00Z", sender="alice-dev", merged=True))
     assert _texts(app, "2026-11-12T09:00:00+00:00") == []
+
+
+def test_quiet_work_is_marked_not_overdue(app):
+    """A PR with no activity for QUIET_DAYS is marked untouched; it is not made overdue."""
+    from gh import pr_event
+    from tend import brief
+    _ing(app, "pull_request", pr_event("opened", n=8, at="2026-10-15T01:00:00Z", sender="nd-aad", author="nd-aad"))
+    lines = app.brief("2026-10-20T09:00:00+00:00").lines
+    assert [l.text for l in lines] == ["Merge or close: Add ledger (attedra#8)"]
+    lines = app.brief("2026-11-11T09:00:00+00:00").lines
+    assert [(l.section, l.text) for l in lines] == [
+        ("Your commitments", "Merge or close: Add ledger (attedra#8), untouched for 27 days")]
+    assert brief.QUIET_RULE == "quiet-v1" and brief.QUIET_DAYS == 7

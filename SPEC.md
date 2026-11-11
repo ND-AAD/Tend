@@ -277,6 +277,8 @@ Pairs with equal scores are ordered by the number of best readings (`low_confide
 3. **Waiting on others**: open entries obligated on anyone else.
 4. **Coming up**: `upcoming` entries.
 
+Quiet work (rule `quiet-v1`, `brief.QUIET_DAYS` = 7): a line whose subject has had no message carrying an active claim about it for at least 7 days at the cutoff gets ", untouched for N days". It is derived at read time from the ledger, changes no section, and is never written to the store as a deadline; overdue stays the store's own standing.
+
 Each line: label of the subject, the property in words, the deadline, who asked, and `(my best reading)` for low-confidence claims. Grounding: every line holds the unit reference and the `began.record` reference. Both must resolve through the `exact` read; a line whose references do not resolve is omitted and logged.
 
 ## 11. Configuration
