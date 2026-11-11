@@ -172,27 +172,46 @@ def ingest(event_name: str, payload: dict, cfg: Config, ledger: Ledger, projecto
     out, the early event is mapped, and the later events are mapped again from their stored
     payloads in event-time order (SPEC §5.5). Claim ids are deterministic, so owner acts and
     withdrawals that name them still apply."""
+    projector.settle("github")
     first = map_event(event_name, payload, cfg, ledger)
     if first is None:
         return None
     msg = first[0]
+    if ledger.message(msg["id"]):                 # replay: already ingested
+        if msg["id"] in ledger.unprojected():
+            projector.refresh("github")          # a retry completes the projection
+        return msg["id"]
     with ledger.conn.transaction():
-        if ledger.message(msg["id"]):
-            return msg["id"]          # replay: already ingested
         later = [m for m in ledger.messages() if m["thread_id"] == msg["thread_id"] and m["provider"] == "gh"
                  and instants.sort_key(m["sent_at"]) > instants.sort_key(msg["sent_at"])]
         later.sort(key=lambda m: (instants.sort_key(m["sent_at"]), m["id"]))
-        if later:
-            stored = {m["id"]: ledger.payload(m["id"]) for m in later}
+        stored = {m["id"]: ledger.payload(m["id"]) for m in later}
+        if later and any(v is None for v in stored.values()):
+            # a ledger older than stored payloads: the later claims cannot be regenerated, so they
+            # are never deleted; the early event is mapped as it arrives, and the store is rebuilt
+            msg, claims = first
+            # without the later payloads their effect cannot be recomputed, so the early event may
+            # not end what a later event of the subject left standing: once a later event states
+            # the subject's state, the early event's withdrawals are left out (its statements are
+            # kept; the projection orders them by time)
+            later_ids = {m["id"] for m in later}
+            restated = any(c.message_id in later_ids and c.kind == "statement" and c.property == "state"
+                           for c in ledger.active_claims())
+            omitted = [c.id for c in claims if restated and c.kind == "withdrawal"]
+            claims = [c for c in claims if c.id not in omitted]
+            ledger.log("github", "rederive_impossible", "a later event has no stored payload",
+                       message=msg["id"], later=[m["id"] for m in later if stored[m["id"]] is None],
+                       omitted=omitted)
+            ledger.add_message(msg)
+            _store(ledger, msg, claims, event_name, payload)
+            ledger.mark_stale(f"github event {msg['id']} arrived before later events")
+        elif later:
             for m in later:
                 ledger.delete_claims(m["id"])
             msg, claims = map_event(event_name, payload, cfg, ledger)
             ledger.add_message(msg)
             _store(ledger, msg, claims, event_name, payload)
             for m in later:
-                if stored[m["id"]] is None:
-                    ledger.log("github", "rederive_skipped", "no stored payload", message=m["id"])
-                    continue
                 name, p = stored[m["id"]]
                 _, again = map_event(name, p, cfg, ledger)
                 for c in again:

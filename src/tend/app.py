@@ -18,6 +18,10 @@ class App:
         self.ledger.install()
         self.projector = Projector(self.conn, self.ledger, cfg)
         self.projector.initialise()
+        # reconcile on startup: a process killed between a ledger commit and its append left the
+        # store behind the ledger (SPEC §8.2)
+        if self.ledger.unprojected():
+            self.projector.refresh("startup")
 
     @property
     def session(self):

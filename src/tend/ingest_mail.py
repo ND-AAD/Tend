@@ -110,6 +110,8 @@ class MailIngest:
         out = Outcome(msg["id"])
         if self.ledger.message(msg["id"]):
             out.replay = True
+            if msg["id"] in self.ledger.unprojected():
+                self.projector.refresh("resolver")      # a retry completes the projection
             return out
         body = new_text(mail["body"])
         the_pack = pack.build(self.ledger, msg, body, self.cfg.owner_id)
@@ -450,6 +452,9 @@ class MailIngest:
     def rehold(self, msg: dict) -> list[str]:
         """SPEC §7.3: a new message in a thread re-runs resolution for that thread's open holds."""
         done = []
+        if any(h["mention"]["thread_id"] == msg["thread_id"] and h["mention"]["message_id"] != msg["id"]
+               for h in self.ledger.holds()):
+            self.projector.settle("resolver")
         for h in self.ledger.holds():
             m = h["mention"]
             if m["thread_id"] != msg["thread_id"] or m["message_id"] == msg["id"]:
@@ -490,11 +495,23 @@ class MailIngest:
         def people(m: dict) -> set[str]:
             return {m["producer_id"], *m["recipients"]} - {owner}
 
+        def met_before(k: Claim, km: dict, sm: dict) -> bool:
+            return any(t.kind == "statement" and root[t.id] == root[k.id] and t.property == k.property
+                       and t.value == k.value and t.id != s_id[0]
+                       and instants.sort_key(km["sent_at"]) <= instants.sort_key(tm["sent_at"])
+                       < instants.sort_key(sm["sent_at"]) for t, tm in pairs)
+
+        s_id = [""]
+
         def explained(s: Claim, sm: dict) -> bool:
+            """A request on the statement's own Item, among the same people, still open when the
+            statement arrived, accounts for it."""
+            s_id[0] = s.id
             return any(k.kind == "commitment" and k.form == "value" and root[k.id] == root[s.id]
                        and k.property == s.property and k.value == s.value
                        and instants.sort_key(km["sent_at"]) <= instants.sort_key(sm["sent_at"])
                        and (km["thread_id"] == sm["thread_id"] or people(km) & people(sm))
+                       and not met_before(k, km, sm)
                        for k, km in pairs)
 
         for c, m in pairs:
@@ -574,6 +591,7 @@ class MailIngest:
         confident claims never re-checked (SAMPLE): the backstop for a wrong pick no evidence has
         reached yet. Every re-check is remembered with its evidence signature."""
         sample = SAMPLE if sample is None else sample
+        self.projector.settle("reviewer")
         changed: list[str] = []
         done: set[str] = set()
         queue = self.review_queue(limit)

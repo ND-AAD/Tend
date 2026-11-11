@@ -213,16 +213,29 @@ class Projector:
         except Exception:
             self.ledger.mark_stale(f"append of {message_id} failed")
             raise
+        # an interruption before this line (a kill, KeyboardInterrupt) leaves the message recorded
+        # as unprojected in the ledger, so the next refresh rebuilds
+        self.ledger.mark_projected(message_id)
         if latest and instants.sort_key(m["sent_at"]) < instants.sort_key(latest):
             self.ledger.mark_stale(f"message {message_id} arrived out of order")
         else:
             self.ledger.set_meta("latest_sent_at", m["sent_at"])
 
     def refresh(self, agent: str = "tend") -> str | None:
-        """Rebuild if the ledger has changes the store does not show yet."""
+        """Rebuild if the ledger has changes the store does not show yet: a pending rewrite
+        (stale) or a message whose append did not complete (unprojected)."""
         if self.ledger.meta("stale") == "1":
             return self.rebuild(agent, self.ledger.meta("stale_reason") or "stale")
+        if self.ledger.unprojected():
+            return self.rebuild(agent, "messages not yet projected")
         return None
+
+    def settle(self, agent: str = "tend") -> None:
+        """Before a rewrite: make the store show every recorded message, so that the rebuild
+        applying the rewrite compares against a projection that held everything (the visibility
+        invariant's premise, §8.2). Pending rewrites are left for that rebuild."""
+        if self.ledger.unprojected():
+            self.rebuild(agent, "messages not yet projected")
 
     # -- quarantine (SPEC §8.2) ----------------------------------------------------------------
     def quarantined(self) -> dict[str, str]:
@@ -342,6 +355,7 @@ class Projector:
         after = self.open_now()
         self.ledger.set_meta("projection_schema", new)
         self.ledger.set_meta("stale", "0")
+        self.ledger.mark_projected()
         self.ledger.set_meta("stale_reason", "")
         if old:
             with self.conn.cursor() as c:

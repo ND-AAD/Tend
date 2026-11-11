@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS ledger.revisions (
     action text NOT NULL, reason text, detail jsonb NOT NULL DEFAULT '{}');
 -- `via`: the absorbed Item a merge copied this row from (NULL for the Item's own rows), so that
 -- unmerge() removes exactly what the merge added
+CREATE TABLE IF NOT EXISTS ledger.unprojected (message_id text PRIMARY KEY);
 CREATE TABLE IF NOT EXISTS ledger.payloads (
     message_id text PRIMARY KEY, event_name text NOT NULL, payload jsonb NOT NULL);
 ALTER TABLE ledger.names ADD COLUMN IF NOT EXISTS via text;
@@ -76,6 +77,12 @@ class Claim:
     flags: list[str] = field(default_factory=list)
     status: str = "active"
     extractor: str = "deterministic"
+
+
+class BehindLedger(RuntimeError):
+    """A rewrite was attempted while the store lacks recorded messages (SPEC §8.2): the rebuild
+    applying it would compare against a projection that never held them, so nothing it moved
+    could be shown. Callers settle the projector first."""
 
 
 class Ledger:
@@ -185,7 +192,29 @@ class Ledger:
                     "RETURNING id", (m["id"], m["provider"], m["provider_id"], m.get("thread_id"),
                                      m["stream_id"], m["producer_id"], Jsonb(m.get("recipients", [])),
                                      m["sent_at"], Jsonb(m["artifact"])))
+        if r:
+            # cleared by a successful append or a rebuild: until then the store lacks this message
+            self._q("INSERT INTO ledger.unprojected VALUES (%s) ON CONFLICT DO NOTHING", (m["id"],))
         return bool(r)
+
+    def unprojected(self) -> list[str]:
+        return [r[0] for r in self._q("SELECT message_id FROM ledger.unprojected ORDER BY 1")]
+
+    def require_caught_up(self, agent: str) -> None:
+        """The one enforcement point for the visibility invariant's premise: every automated
+        rewrite passes through here. The projector's own drops during a projection are exempt."""
+        if agent == "projector":
+            return
+        pending = self.unprojected()
+        if pending:
+            raise BehindLedger(f"{agent}: {len(pending)} recorded message(s) not yet projected, "
+                               f"first {pending[0]}; settle before rewriting")
+
+    def mark_projected(self, message_id: str | None = None) -> None:
+        if message_id is None:
+            self._q("DELETE FROM ledger.unprojected")
+        else:
+            self._q("DELETE FROM ledger.unprojected WHERE message_id=%s", (message_id,))
 
     def message(self, id: str) -> dict | None:
         r = self._q("SELECT id, provider, provider_id, thread_id, stream_id, producer_id, recipients, sent_at, "
@@ -217,6 +246,7 @@ class Ledger:
     def delete_claims(self, message_id: str) -> None:
         """Only for re-deriving a deterministic mapping, whose claims are regenerated with the
         same ids in the same transaction."""
+        self.require_caught_up("github")
         self._q("DELETE FROM ledger.claims WHERE message_id=%s", (message_id,))
 
     def roots(self) -> dict[str, str]:
@@ -305,6 +335,7 @@ class Ledger:
 
     # -- self-correction (SPEC §8.1, deviations D1, D2) --------------------------------------
     def supersede_claim(self, claim_id: str, agent: str, reason: str, **changes) -> str:
+        self.require_caught_up(agent)
         old = self.claim(claim_id)
         if old is None or old.status != "active":
             raise ValueError(f"claim {claim_id} is not active")
@@ -320,6 +351,7 @@ class Ledger:
         return new_id
 
     def drop_claim(self, claim_id: str, agent: str, reason: str) -> None:
+        self.require_caught_up(agent)
         self.set_status(claim_id, "dropped")
         self.drop_hold(claim_id)
         self.log(agent, "drop_claim", reason, claim=claim_id)
@@ -329,6 +361,7 @@ class Ledger:
         survivor, absorbed = self.root(survivor), self.root(absorbed)
         if survivor == absorbed:
             return
+        self.require_caught_up(agent)
         self._q("UPDATE ledger.items SET merged_into=%s WHERE id=%s", (survivor, absorbed))
         self._q("INSERT INTO ledger.names (item_id, name_norm, name, message_id, stream_id, via) "
                 "SELECT %s, name_norm, name, message_id, stream_id, coalesce(via, %s) FROM ledger.names "
@@ -346,6 +379,7 @@ class Ledger:
         it = self.item(item_id)
         if not it or not it["merged_into"]:
             return False
+        self.require_caught_up(agent)
         above, x = [], it["merged_into"]
         while x and x not in above:
             above.append(x)

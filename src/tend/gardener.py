@@ -140,6 +140,7 @@ def run(ledger: Ledger, cfg: Config, projector, judge: Judge, limit: int = 10) -
     """Judge the top pairs and merge each `same` pair into the older Item. The rebuild that
     applies the merges is the caller's (the nightly batch, or the next list)."""
     merged = []
+    projector.settle("gardener")
     judged = _judged(ledger)
     asked = 0
     for p in detect(ledger, cfg):
