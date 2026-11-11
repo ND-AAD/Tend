@@ -21,12 +21,12 @@ Out of scope for this slice: Slack, calendar, story detection (conflict and chan
 | ID | Deviation | Where implemented |
 |---|---|---|
 | D1 | Tend rewrites its own extraction through the ledger and a rebuild; no correction record remains in the store | `ledger.py` (`supersede_claim`, `drop_claim`), `projector.py` (`rebuild`) |
-| D2 | Items are merged through the identity map at rebuild | `ledger.py` (`merge_items`), `projector.py` |
+| D2 | Items are merged through the identity map at rebuild, and a wrong merge is undone the same way | `ledger.py` (`merge_items`, `unmerge`), `projector.py` |
 | D3 | Your acts survive a rebuild by meaning (target keys), not by Assertion reference; an act whose target no longer exists is dropped and logged | `projector.py` (`project_owner_act`), `app.py` (`owner_act`) |
 | D4 | Eligibility criteria will gate delegated actions (no actions in this slice) | not yet |
 | D5 | The source of a message's statements is its producer's correspondence stream. A GitHub repository's event log is one source with many producers (the self-description's `@producer` is each event's actor) | `ingest_mail.py` (`record`), `projector.py` (`project_message`) |
 | D6 | A rebuild erases what was known when. Each projection shows the ledger's current reading of every message as if it had been read that way from the start; the history of readings lives only in `revisions` | `projector.py` (`rebuild`), `ledger.py` (`revisions`) |
-| D7 | The store is a filtered record. A proposal the audit refuses never reaches it, so if a sender revises a value and the revision is refused, the earlier position stays in force (5.2.1) | `ingest_mail.py` (`audit`) |
+| D7 | The store is a filtered record. A proposal the audit refuses never reaches it, so if a sender revises a value and the revision is refused, the earlier position stays in force (5.2.1). A record a rebuild sets aside (quarantine, §8.2) is missing from the store until released. The list names both, so the filter is never silent | `ingest_mail.py` (`audit`), `projector.py` (`quarantine`), `brief.py` |
 | D8 | A best reading is recorded as the source's statement. A `low_confidence` claim is asserted with the producer's stream as source like any other; the doubt is Tend's and lives in the ledger flag, not in the store | `ingest_mail.py` (`_write`) |
 
 Each projection is built only through `attedra_ref.api.Session`, and `rebuild` runs the `transition_check` read (9.5.8) afterwards. A non-empty difference list fails the rebuild and keeps the previous projection.
@@ -153,7 +153,7 @@ Each entry: id, kind, label, up to 5 recorded names, up to 3 latest claims (prop
 
 ### 6.3 Audit
 
-Applied to each proposal in order. Failure codes are logged to `revisions` with `action: "audit_refused"`.
+Applied to each proposal in order. Each refusal is logged to `revisions` with `action: "audit_refused"`, its code, and the proposal's quote, kind and party, in the same transaction as the message (a message whose model work fails stores nothing, so no orphan refusal is logged). The list shows refused requests (§10): an audit refusal is never silent.
 
 | Check | Rule | Failure |
 |---|---|---|
@@ -163,7 +163,8 @@ Applied to each proposal in order. Failure codes are logged to `revisions` with 
 | `people` | on a commitment, `obligated` and `party` are person ids from the message's producer or recipients, or the owner. A bare address is read as `person:<address>`. On a statement both are ignored | drop |
 | `existing` | `item_id` is in the pack | treat the mention as `unsure` |
 | `new` | no Item has an exact key in the mention's text, and no Item of the same kind has a recorded name equal to the normalised `text` or `label` | first time: re-ask the resolver with the matching Item added; second time: treat as `unsure` |
-| `deadline` | see §6.4 | drop the deadline, keep the claim, flag `deadline_unchecked` |
+| `deadline` | see §6.4 | drop the deadline, keep the claim, flag `deadline_unchecked`; log `deadline_refused` with the sender's words, which the list shows |
+| `vocabulary, after resolution` | the property is checked again against the kind of the Item resolution actually chose (`MailIngest.fits`), on ingest and on every re-resolution | on ingest, refuse with `property_outside_schema`; on re-resolution, move nothing (`move_refused`) |
 
 ### 6.4 Deadlines
 
@@ -179,7 +180,7 @@ The value is an instant in 4.2.1 form. The audit converts the extractor's `value
 
 ### 7.1 Mentions settled by code
 
-A mention whose text contains an exact key of exactly one Item resolves to that Item with confidence 1, whatever the model said.
+A mention whose text contains an exact key of exactly one Item resolves to that Item with confidence 1, whatever the model said, including the kind it guessed. An exact key is identity; a property that Item's kind cannot carry is then refused by the vocabulary check of §6.3 and shown as "could not place", rather than written on a guessed Item of another kind.
 
 ### 7.2 Confidence
 
@@ -198,7 +199,7 @@ Implementation rules that the formula leaves open:
 - The winner is the option with the most votes; structural support shapes q and breaks ties among the most-voted, but never lets a minority win.
 - Name check (your mechanism of flagging an existing Item and checking it against the nomenclature): a winning existing Item must share a word, other than articles and words such as "revised" or "draft", with one of its recorded names or its label, or already be linked from the message's thread. A pick that fails is logged `name_check_failed` and is not confident.
 - The extractor's `resolution` is a hint carried into the resolver's input; the K votes decide. An `existing` hint whose id is not in the pack is downgraded to `unsure` before the votes.
-- The `existing` and `new` audit checks of §6.3 apply to every vote. A vote naming an id outside the candidates is discarded and logged `invented_id`. A `new` vote whose text or label collides with an exact key or a recorded name of the same kind is discarded on the first round, the colliding Items are added to the candidates, and all K votes are re-run. On the second round a `new` vote counts: the resolver has seen the colliding Item and still says new (two things can share a name).
+- The `existing` and `new` audit checks of §6.3 apply to every vote. A vote naming an id outside the candidates is discarded and logged `invented_id`. Every informed vote counts: a `new` vote is set aside only when it collides (exact key or recorded name of the same kind) with an Item the resolver was not shown. Those Items are added to the candidates and all K votes are taken again; on that round every `new` vote counts. A `new` vote that collides only with Items already among the candidates counts on the first round: the resolver saw them and still said new (two things can share a name).
 - No valid votes at all: a new Item from the extractor's label, as a best reading. A claim is never dropped for lack of a subject.
 - The owner is excluded from the anchors and from the graph. The owner is adjacent to nearly every Item, so including the owner would give every candidate support and make s meaningless.
 - The label and kind of a `new` winner are the most common pair among the `new` votes.
@@ -225,7 +226,8 @@ None in this slice. A `low_confidence` claim is marked in the morning list with 
 |---|---|
 | `supersede_claim(id, new_fields, agent, reason)` | old claim `superseded`, a new claim with the new fields, revision logged |
 | `drop_claim(id, agent, reason)` | claim `dropped`, revision logged |
-| `merge_items(survivor, absorbed, agent, reason)` | `absorbed.merged_into = survivor`; names and links move to the survivor; revision logged |
+| `merge_items(survivor, absorbed, agent, reason)` | `absorbed.merged_into = survivor`; names and links are copied to the survivor marked `via` the absorbed Item; exact keys stay where they were given (`items_by_key` returns roots); revision logged |
+| `unmerge(item, agent, reason)` | `item.merged_into = NULL`; the rows marked `via` the item or any Item merged into it are removed from every Item above it; revision logged. Run when a confident re-resolution names an absorbed Item (§8.4), which also records the pair as judged different |
 
 Any operation marks the projection stale. `rebuild()` runs after a batch of operations, not after each one.
 
@@ -238,7 +240,9 @@ Any operation marks the projection stale. `rebuild()` runs after a batch of oper
 5. Run `transition_check` on `scope:owner`. Any difference: drop the new schema, log the failure, keep the old projection.
 6. Set `meta.projection_schema`, drop the old schema.
 
-Appending a new message (`append`) runs step 3 for that message only, against the live schema. Reads at "now" are then correct. Two cases also mark the ledger stale (`meta.stale`, with `stale_reason`): a message older than the latest one projected, whose live Connections would keep a later first-seen instant, and a failed append, which re-raises with the message kept in the ledger. Supersessions, drops and merges mark it stale too. Nothing rebuilds inside ingestion: a rebuild costs a full replay. `refresh()` rebuilds when stale and runs before every morning list and at the end of the nightly batch. Any exception during a rebuild, not only a write error, restores the previous projection.
+Appending a new message (`append`) runs step 3 for that message only, against the live schema. Reads at "now" are then correct. Two cases also mark the ledger stale (`meta.stale`, with `stale_reason`): a message older than the latest one projected, whose live Connections would keep a later first-seen instant, and a failed append, which re-raises with the message kept in the ledger. Supersessions, drops, merges and unmerges mark it stale too. Nothing rebuilds inside ingestion: a rebuild costs a full replay. `refresh()` rebuilds when stale and runs before every morning list and at the end of the nightly batch. Any exception during a rebuild, not only a write error, restores the previous projection.
+
+Invariant: one record that cannot be projected costs that record, never the list. A rebuild that fails while replaying a message or owner act puts it in quarantine (`meta.quarantine`, revision `quarantined`) and tries again, up to `MAX_QUARANTINE` records. Quarantined records are skipped on replay and named on the list as set aside. `tend rebuild` releases the quarantine and retries everything (after a fix). A failure no record can be blamed for (the transition check, the fixed records) keeps the previous projection, and the list is served from it with the note "this list may be out of date".
 
 ### 8.3 Owner acts across rebuilds (D3)
 
@@ -246,13 +250,27 @@ An owner act's `target` is a key: `{"claim": <claim id>}` for an expectation. At
 
 ### 8.4 Noticing and rewriting errors
 
-`reresolve(claim)` re-runs §7.2 for a claim's mention with a fresh pack. A confident answer naming a different Item supersedes the claim onto it (§8.1); a confident answer confirming the subject clears `low_confidence`; an answer still short of the rule updates the hold's q.
+`reresolve(claim)` re-runs §7.2 for a claim's mention with a fresh pack.
 
-Triggers:
+Invariant: a re-check sees the store as if the claim had not been placed. Inside a transaction that is rolled back, the claim is hidden, its message's names on its subject are removed (unless another claim of the message is on that subject), and so is its thread's link to the subject (unless another claim from the thread is about it). Without this, the name a guess recorded makes the guess look named, and the link it made makes it look supported. The current subject is always among the candidates, on its other evidence, so that a move is a choice against it. An Item with no evidence besides the claim is offered too, and a vote for it counts as a vote for a new Item of its label, which is what it is.
+
+Outcomes:
+
+- Confident, same subject: `low_confidence` is cleared (`resolution_confirmed`).
+- Confident, another subject: the claim is superseded onto it (§8.1), unless the subject's kind cannot carry the property, or the mention shares more words with the current subject's label and its names from other messages than with the target's ("Acme deck v1" is not moved to v2). Both refusals are logged `move_refused`.
+- Confident, naming an absorbed Item: the merge is undone (§8.1) and the claim stays on, or moves to, that Item.
+- Not confident: a best reading keeps its hold, with q updated. A claim that was confident becomes a best reading (`doubted`): the evidence that queued it stands, and the list says so.
+
+Triggers. Self-correction is triggered by evidence as well as doubt: a confident wrong pick has no doubt to be found by, so contrary evidence has to reopen it.
 
 1. A new message in the thread of an open hold (§7.3).
-2. The review queue, run nightly (`review(limit=20)`): every active mail claim that is a best reading, or whose resolving name is now recorded on more than one active Item of its kind (how a confident pick becomes doubtful), ordered by confidence q, lowest first.
-3. The gardener's merges (§9).
+2. The review queue, run nightly (`review(limit=20)`). `reasons()` gives why each active mail claim is open to re-check:
+   - doubt: `best_reading` (flag `low_confidence`), `shared_name` (its resolving name is now on two active Items of its kind);
+   - evidence, whatever the claim's confidence: `displaced` (an open request on A, and a later statement on another Item of A's kind that says what was asked, in the same thread or among the same non-owner people: the request may have been placed on the wrong Item, or the statement may have been), `conflict` (Attedra's `conflicts` read on the claim's subject finds sources disagreeing on its property), `merged` (its Item was absorbed by a merge).
+   Evidence entries come first, then doubt; within each, lowest confidence first. After a change the queue is read again, since one correction can settle other entries.
+3. Memory: every re-check logs `reviewed` with a signature of what it rested on (the reasons, the subject, the flags, and the pack the resolver would be shown). A claim whose signature is unchanged is not re-checked, so the queue moves on instead of re-asking the same claims every night.
+4. A backstop sample: each night `SAMPLE` = 2 confident mail claims never re-checked, chosen at random, are re-checked. It finds wrong picks no evidence has reached yet, and gives a measured rate of confident errors.
+5. The gardener's merges (§9).
 
 The nightly batch is: `release_holds`, `review`, gardener `run`, then one `refresh`.
 
@@ -261,12 +279,12 @@ The nightly batch is: `release_holds`, `review`, gardener `run`, then one `refre
 `detect()` returns candidate pairs of active Items of one kind, ranked:
 
 1. Shared recorded name (score 1.0).
-2. Neighbourhood Jaccard ≥ 0.6 over two-hop neighbours (score = the Jaccard), only for pairs whose recorded names or labels share a word other than articles and words such as "revised". Sharing a correspondent alone makes every Item from that person a neighbour of every other, so it is not evidence of identity.
+2. Neighbourhood Jaccard ≥ 0.6 over two-hop neighbours (score = the Jaccard), only for pairs whose recorded names or labels share a rare word: not an article or a word such as "revised", and carried by at most `RARE_MAX` = 2 Items of the kind. Sharing a correspondent makes every Item from that person a neighbour of every other, and a client's name is shared by all of that client's Items, so neither is evidence of identity.
 3. Each best reading (`uncertain_write`, `hold_released` revisions), as the pair (its subject, its runner-up option) (score 0.5).
 
 Pairs with equal scores are ordered by the number of best readings (`low_confidence` claims) on the two Items, most first, so judge calls go where the store's identity is least certain.
 
-`run(judge, limit=10)` asks `judge.same(a, b, evidence)` for the top pairs. On `same`, it merges into the older Item (smaller `created_at`, then smaller id), with the judge's reason. A pair judged different is not asked again until the two Items' claim count changes (revision `judged` records it). Merges mark the store stale; the batch `refresh` applies them.
+`run(judge, limit=10)` asks `judge.same(a, b, evidence)` for the top pairs. On `same`, it merges into the older Item (smaller `created_at`, then smaller id), with the judge's reason. A pair judged different is not asked again until the evidence it was judged on changes: the signature of the two Items' names and neighbourhoods (revision `judged` records it). Another claim that adds no name and no neighbour does not reopen the pair. Merges mark the store stale; the batch `refresh` applies them.
 
 ## 10. Morning list
 
@@ -276,10 +294,14 @@ Pairs with equal scores are ordered by the number of best readings (`low_confide
 2. **Your commitments**: other open entries obligated on the owner (`elig:<owner>`), asks first.
 3. **Waiting on others**: open entries obligated on anyone else.
 4. **Coming up**: `upcoming` entries.
+5. **Closed on my best reading**: requests no longer open only because best-reading statements (`low_confidence`) said what was asked. The closing is real in the store; the line quotes the statement and who sent it.
+6. **Could not place**: requests the audit refused (§6.3), with the sender's words, date and why. Refused statements are counted in a note, not listed. A refusal for `quote_not_in_body` is not shown: the words are the extractor's, not the sender's.
 
-Quiet work (rule `quiet-v1`, `brief.QUIET_DAYS` = 7): a line whose subject has had no message carrying an active claim about it for at least 7 days at the cutoff gets ", untouched for N days". It is derived at read time from the ledger, changes no section, and is never written to the store as a deadline; overdue stays the store's own standing.
+Sections 5 and 6 show the last `RECENT_DAYS` = 14 days (rule `recent-v1`). Notes above the sections name records set aside by quarantine and say when the list may be out of date (§8.2). The list never hides what Tend read: an item is either open, closed on evidence, closed on a guess that says so, or could not be placed.
 
-Each line: label of the subject, the property in words, the deadline, who asked, and `(my best reading)` for low-confidence claims. Grounding: every line holds the unit reference and the `began.record` reference. Both must resolve through the `exact` read; a line whose references do not resolve is omitted and logged.
+Quiet work (rule `quiet-v2`, `brief.QUIET_DAYS` = 7): a line whose subject no recorded message has touched for at least 7 days at the cutoff gets ", untouched for N days". A message touches a subject when it carries a claim about it or is in a thread linked to it (a review, a push or a reply that maps to no claim still counts). Activity is read once per list. It is derived at read time from the ledger, changes no section, and is never written to the store as a deadline; overdue stays the store's own standing.
+
+Each line: label of the subject, the property in words, the deadline (or, when the audit could not check it, the sender's words with "(date not checked)"), who asked, and `(my best reading)` for low-confidence claims. Grounding: every line holds exact references (the unit and `began.record` for open entries, the expectation and the closing statement for section 5, the message for section 6). All must resolve through the `exact` read; a line whose references do not resolve is omitted and logged.
 
 ## 11. Configuration
 
@@ -298,4 +320,5 @@ Real PostgreSQL, no mocks of the engine. Model calls go through `llm.Resolver` a
 7. Merge: two Items split across two threads are merged by the gardener; after rebuild one expectation is fulfilled by evidence that was attached to the other.
 8. Owner acts survive a rebuild that supersedes the target claim, and are dropped when the target is dropped.
 9. Rebuild failure of any kind keeps the previous projection; a failed append is repaired by the next refresh; out-of-order arrival gives the same store as a rebuild.
+10. The third review's findings (tests/test_third_review.py): reopened work returns; informed votes count; an exact key wins and the vocabulary refuses; a confident wrong pick is rewritten on evidence; a re-check does not see its own footprint; the queue remembers; a request closed on a guess, a refused request and an unchecked deadline are shown; a client's name is not identity; a poison record is quarantined; a wrong merge is undone; quiet counts every recorded message.
 10. From the second review: a re-requested review reappears; a merged PR, or an issue closed by someone else, leaves the list; a reopened and reassigned issue returns; evidence before `setup_at` qualifies; candidates are filtered by kind; a colliding name never drops a request; the review queue rewrites a confident pick made doubtful; the gardener ignores a shared correspondent and remembers its verdicts.

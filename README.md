@@ -23,16 +23,20 @@ Attedra references it relies on.
   decides whether a resolution is confident enough to write, using vote entropy weighted by
   structural support. An uncertain resolution is written at once as a flagged best reading, shown
   as "my best reading", and re-checked by later messages and a nightly review queue that rewrites
-  it when the answer changes. You are never asked what is what.
+  it when the answer changes. The queue is entered on contrary evidence as well as on doubt, so a
+  confident wrong pick is found too. You are never asked what is what.
 - **Gardener** (`gardener.py`): finds Items that may be one thing, asks a judge, merges, rebuilds.
 - **Morning list** (`brief.py`): the `what_remains` read, grouped and grounded.
 
 ## Deviations from Attedra 0.1.0
 
-Apache 2.0 allows changes with the deviations noted. They are listed in `SPEC.md` §2 (D1 to D5):
-Tend rewrites its own extraction by rebuild rather than by correction records, merges Items
-through an identity map, keeps your acts by meaning across rebuilds, and uses one correspondence
-stream per producer as the source.
+Apache 2.0 allows changes with the deviations noted. They are listed in `SPEC.md` §2 (D1 to D8):
+Tend rewrites its own extraction by rebuild rather than by correction records (so a rebuild erases
+what was known when; the history of readings stays in the ledger), merges and unmerges Items
+through an identity map, keeps your acts by meaning across rebuilds, uses one correspondence
+stream per producer as the source, keeps a filtered record (refused proposals and set-aside
+records never reach the store, and the list names them), and records a best reading as the
+source's statement with the doubt kept in the ledger.
 
 ## Running
 
