@@ -3,7 +3,7 @@ fulfils the expectation on the other after the rebuild."""
 from __future__ import annotations
 
 import fakes
-from assistant import gardener
+from tend import gardener
 from fakes import mail, mention, proposal
 from test_mail import DANA, NICK, _ask, _commit
 

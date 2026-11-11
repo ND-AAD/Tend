@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import pytest
 
-from assistant import confidence, deadlines
-from assistant.deadlines import DeadlineRefused
+from tend import confidence, deadlines
+from tend.deadlines import DeadlineRefused
 
 SENT = "2026-11-10T09:00:00-08:00"   # a Tuesday
 

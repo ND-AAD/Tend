@@ -73,7 +73,7 @@ class Projector:
     def event(self, id: str, at: str) -> None:
         self.item(id, "event", None, {"@context": {"role": "event", "at": at}})
 
-    def write(self, item: str, context: str, source: str, values: dict, by: str = "assistant") -> dict:
+    def write(self, item: str, context: str, source: str, values: dict, by: str = "tend") -> dict:
         return self.session.assert_(item, context, source, json.dumps(values, sort_keys=True), recorded_by=by)
 
     def _fixed(self) -> None:
@@ -212,14 +212,14 @@ class Projector:
         else:
             self.ledger.set_meta("latest_sent_at", m["sent_at"])
 
-    def refresh(self, agent: str = "assistant") -> str | None:
+    def refresh(self, agent: str = "tend") -> str | None:
         """Rebuild if the ledger has changes the store does not show yet."""
         if self.ledger.meta("stale") == "1":
             return self.rebuild(agent, self.ledger.meta("stale_reason") or "stale")
         return None
 
     # -- rebuild (SPEC §8.2) -------------------------------------------------------------------
-    def rebuild(self, agent: str = "assistant", reason: str = "") -> str:
+    def rebuild(self, agent: str = "tend", reason: str = "") -> str:
         old = self.ledger.meta("projection_schema")
         n = int(old.split("_")[1]) + 1 if old else 1
         new = f"proj_{n}"

@@ -1,4 +1,4 @@
-"""Command line: `assistant --config config.toml <command>`.
+"""Command line: `tend --config config.toml <command>`.
 
 Commands: init | github EVENT PAYLOAD.json | mail MESSAGE.json | release [NOW] | garden | nightly | rebuild |
 brief [CUTOFF] | snooze CLAIM UNTIL | withdraw CLAIM. Mail and garden call Claude and need
@@ -19,7 +19,7 @@ def _now() -> str:
 
 
 def main(argv: list[str] | None = None) -> None:
-    p = argparse.ArgumentParser(prog="assistant")
+    p = argparse.ArgumentParser(prog="tend")
     p.add_argument("--config", default="config.toml")
     p.add_argument("command")
     p.add_argument("args", nargs="*")

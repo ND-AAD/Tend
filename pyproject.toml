@@ -1,7 +1,7 @@
 [project]
-name = "attedra-assistant"
+name = "tend"
 version = "0.0.1"
-description = "Personal assistant built on Attedra 0.1.0 (first slice)"
+description = "Tend: a personal assistant built on Attedra 0.1.0 (first slice)"
 requires-python = ">=3.12"
 dependencies = [
     "attedra-ref",
@@ -13,7 +13,7 @@ dependencies = [
 test = ["pytest>=8"]
 
 [project.scripts]
-assistant = "assistant.cli:main"
+tend = "tend.cli:main"
 
 [tool.uv.sources]
 attedra-ref = { path = "vendor/attedra", editable = true }

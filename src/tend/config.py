@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 class Config:
     owner_id: str
     owner_identifiers: list[str] = field(default_factory=list)
-    database_url: str = "postgresql://assistant:assistant@localhost/assistant_dev"
+    database_url: str = "postgresql://tend:tend@localhost/tend_dev"
     setup_at: str = "2026-01-01-00:00"
     extractor_model: str = "claude-opus-5-5"
     gardener_model: str = "claude-opus-5-5"

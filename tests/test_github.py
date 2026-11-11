@@ -1,4 +1,4 @@
-from assistant import brief, ingest_github as gh
+from tend import brief, ingest_github as gh
 from gh import pr_event, review_submitted
 
 
@@ -55,7 +55,7 @@ def _issue(action, n=3, at="2026-11-10T17:00:00Z", sender="alice-dev", **extra):
 
 
 def _ing(app, name, payload):
-    from assistant import ingest_github as gh
+    from tend import ingest_github as gh
     return gh.ingest(name, payload, app.cfg, app.ledger, app.projector)
 
 

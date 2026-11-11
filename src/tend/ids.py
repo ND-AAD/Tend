@@ -69,7 +69,7 @@ def elig(person_id: str) -> str:
 SETUP_CONTEXT = "ev:setup"
 ELIGIBILITY_CONTEXT = "ev:eligibility"   # dated at EPOCH so that evidence of any date qualifies (3.3.2)
 EPOCH = "1970-01-01+00:00"
-CONFIG_SOURCE = "src:assistant-config"
+CONFIG_SOURCE = "src:tend-config"
 SCOPE = "scope:owner"
 OWNER_REVIEW = "src:owner-review"
 

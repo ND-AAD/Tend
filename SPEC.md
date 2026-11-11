@@ -1,12 +1,12 @@
-# Personal assistant on Attedra: first-slice specification
+# Tend: first-slice specification
 
-Status: draft for review, 2026-11-11. Design rationale lives in the proposal document "Personal assistant on Attedra: architecture proposal". This file states what the first slice does, precisely enough that an implementer makes no judgment calls. Rule numbers such as (6.3.1) refer to `Attedra_Specification.md` 0.1.0.
+Status: draft for review, 2026-11-11. Design rationale lives in the proposal document "Tend: architecture proposal". This file states what the first slice does, precisely enough that an implementer makes no judgment calls. Rule numbers such as (6.3.1) refer to `vendor/attedra/Attedra_Specification.md` 0.1.0.
 
 ## 1. Scope of the first slice
 
 In scope:
 
-1. A ledger (application tables) that is the source of truth for everything the assistant extracted, and a projection into an Attedra store built from it.
+1. A ledger (application tables) that is the source of truth for everything Tend extracted, and a projection into an Attedra store built from it.
 2. Deterministic GitHub ingestion: pull request and issue events.
 3. Mail ingestion through a frontier-model extractor, a deterministic audit, and entropy-based resolution confidence.
 4. A morning list built from the `what_remains` read, with every line grounded in exact references.
@@ -20,14 +20,14 @@ Out of scope for this slice: Slack, calendar, story detection (conflict and chan
 
 | ID | Deviation | Where implemented |
 |---|---|---|
-| D1 | The assistant rewrites its own extraction through the ledger and a rebuild; no correction record remains in the store | `ledger.py` (`supersede_claim`, `drop_claim`), `projector.py` (`rebuild`) |
+| D1 | Tend rewrites its own extraction through the ledger and a rebuild; no correction record remains in the store | `ledger.py` (`supersede_claim`, `drop_claim`), `projector.py` (`rebuild`) |
 | D2 | Items are merged through the identity map at rebuild | `ledger.py` (`merge_items`), `projector.py` |
 | D3 | Your acts survive a rebuild by meaning (target keys), not by Assertion reference; an act whose target no longer exists is dropped and logged | `projector.py` (`project_owner_act`), `app.py` (`owner_act`) |
 | D4 | Eligibility criteria will gate delegated actions (no actions in this slice) | not yet |
 | D5 | The source of a message's statements is its producer's correspondence stream. A GitHub repository's event log is one source with many producers (the self-description's `@producer` is each event's actor) | `ingest_mail.py` (`record`), `projector.py` (`project_message`) |
 | D6 | A rebuild erases what was known when. Each projection shows the ledger's current reading of every message as if it had been read that way from the start; the history of readings lives only in `revisions` | `projector.py` (`rebuild`), `ledger.py` (`revisions`) |
 | D7 | The store is a filtered record. A proposal the audit refuses never reaches it, so if a sender revises a value and the revision is refused, the earlier position stays in force (5.2.1) | `ingest_mail.py` (`audit`) |
-| D8 | A best reading is recorded as the source's statement. A `low_confidence` claim is asserted with the producer's stream as source like any other; the doubt is the assistant's and lives in the ledger flag, not in the store | `ingest_mail.py` (`_write`) |
+| D8 | A best reading is recorded as the source's statement. A `low_confidence` claim is asserted with the producer's stream as source like any other; the doubt is Tend's and lives in the ledger flag, not in the store | `ingest_mail.py` (`_write`) |
 
 Each projection is built only through `attedra_ref.api.Session`, and `rebuild` runs the `transition_check` read (9.5.8) afterwards. A non-empty difference list fails the rebuild and keeps the previous projection.
 
@@ -49,7 +49,7 @@ All Item ids are deterministic so that a rebuild reproduces the same store from 
 | Expectation context of a claim | `expctx:<claim id>` | `expectation_context` |
 | Establishing act of a claim | `act:<claim id>` | `commitment` |
 | Eligibility Item of a person | `elig:<person id>` | `eligibility` |
-| Setup context / config source | `ev:setup` (at `config.setup_at`) / `src:assistant-config` | `event` / `config` |
+| Setup context / config source | `ev:setup` (at `config.setup_at`) / `src:tend-config` | `event` / `config` |
 | Scope Item | `scope:owner` | `scope` |
 | Your acts | item `act:human:<act id>`, context `ev:human:<act id>`, source `src:owner-review` | `owner_act` / `event` / `review_log` |
 
@@ -75,7 +75,7 @@ PostgreSQL schema `ledger`. All tables are mutable by the application; every mut
 
 ### 5.1 Fixed records
 
-At projection creation: Items `ev:setup`, `ev:eligibility`, `src:assistant-config`, `scope:owner`, `src:owner-review`, the owner person.
+At projection creation: Items `ev:setup`, `ev:eligibility`, `src:tend-config`, `scope:owner`, `src:owner-review`, the owner person.
 
 ### 5.2 A message
 
@@ -93,7 +93,7 @@ All active statement claims of M about one subject X form one Assertion `(X, E, 
 
 For commitment claim C (obligated O, instructing party A, subject X, property p, value v or ask, deadline d):
 
-1. Ensure `elig:O` exists with `{"@eligibility": true}` and criteria `(elig:O, ev:eligibility, src:assistant-config) {"@eligible": {"party": O}}`. `ev:eligibility` is dated `1970-01-01+00:00` so that evidence of any date qualifies (3.3.2); dated at `setup_at` it would reject evidence older than the installation.
+1. Ensure `elig:O` exists with `{"@eligibility": true}` and criteria `(elig:O, ev:eligibility, src:tend-config) {"@eligible": {"party": O}}`. `ev:eligibility` is dated `1970-01-01+00:00` so that evidence of any date qualifies (3.3.2); dated at `setup_at` it would reject evidence older than the installation.
 2. Create `expctx:C` with `{"@context": {"role": "expectation", "timing": T, "fresh": true}}`. `fresh` (6.2.2) makes only evidence at or after this establishment count, so a review requested again after an earlier review is open again, T = `{"type": "by", "instant": d}` when d exists, else `{"type": "any"}`.
 3. Assert the expectation `(X, expctx:C, elig:O)` with `{p: v}`, or `{p: {"@ask": true}}` for an ask.
 4. Assert the establish act `(act:C, E, S)` with `@action: establish`, `@targets` the expectation, `@party: A`, `@issuance: E`, `@basis: [M.artifact]`.
@@ -231,7 +231,7 @@ Any operation marks the projection stale. `rebuild()` runs after a batch of oper
 
 ### 8.2 Rebuild
 
-1. Create schema `proj_<n+1>` and apply `reference/schema.sql` inside it.
+1. Create schema `proj_<n+1>` and apply `vendor/attedra/reference/schema.sql` inside it.
 2. Create the fixed records (§5.1).
 3. Replay, in order of instant (ties by id): every message with its active claims, mapping every Item id through `merged_into` to its root; and every owner act (§8.3).
 4. Create Connections from `links`, mapped through `merged_into`, at the earliest message instant that produced them.

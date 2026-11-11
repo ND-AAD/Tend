@@ -6,7 +6,7 @@ from types import SimpleNamespace as NS
 
 import pytest
 
-from assistant import llm
+from tend import llm
 
 
 class Stub:

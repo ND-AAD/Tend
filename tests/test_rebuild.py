@@ -6,7 +6,7 @@ import pytest
 from attedra_ref.errors import WriteError
 
 import fakes
-from assistant.projector import RebuildFailed
+from tend.projector import RebuildFailed
 from test_mail import NICK, _ask, _commit
 
 
@@ -39,8 +39,8 @@ def test_rebuild_reproduces_store(app):
 
 def test_supersede_rewrites_without_trace(app):
     cid = _seed(app)
-    new = app.ledger.supersede_claim(cid, "assistant", "misread the deadline", deadline="2026-11-14-08:00")
-    app.projector.rebuild("assistant", "correction")
+    new = app.ledger.supersede_claim(cid, "tend", "misread the deadline", deadline="2026-11-14-08:00")
+    app.projector.rebuild("tend", "correction")
     s = snapshot(app)
     ctx = [a for a in s["assertions"] if a[1].startswith("expctx:")]
     assert [a[1] for a in ctx] == ["expctx:" + new]
@@ -54,11 +54,11 @@ def test_owner_acts_survive_rebuild(app):
     assert len(app.brief(when).lines) == 1
     app.owner_act("snooze", cid, "2026-11-10T12:00:00-08:00", until="2026-11-12-08:00")
     assert app.brief(when).lines == []
-    new = app.ledger.supersede_claim(cid, "assistant", "deadline was Monday", deadline="2026-11-16-08:00")
+    new = app.ledger.supersede_claim(cid, "tend", "deadline was Monday", deadline="2026-11-16-08:00")
     app.projector.rebuild()
     assert app.brief(when).lines == []                       # the snooze now targets the successor
     assert len(app.brief("2026-11-13T09:00-08:00").lines) == 1   # and lapses at its @until
-    app.ledger.drop_claim(new, "assistant", "not a request after all")
+    app.ledger.drop_claim(new, "tend", "not a request after all")
     app.projector.rebuild()
     assert app.ledger.revisions("owner_act_dropped")
     assert app.brief("2026-11-13T09:00-08:00").lines == []
