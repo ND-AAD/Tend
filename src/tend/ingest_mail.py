@@ -16,6 +16,9 @@ from . import confidence, deadlines, gardener, ids, instants, pack, schema
 from .config import Config
 from .ledger import Claim, Ledger, normalise
 from .llm import Extractor, Resolver
+from .projector import holding
+
+_held = holding(lambda self, *a, **k: self.projector)
 
 EXTRACTOR = "mail-v1"
 HOLD_HOURS = 72
@@ -125,6 +128,11 @@ class MailIngest:
                 out.refused.append((i, r.code))
                 continue
             decided.append((claim, mention, self.resolve(mention, claim.quote or "", msg, the_pack)))
+        return self._commit(msg, out, decided, notes)
+
+    @_held
+    def _commit(self, msg: dict, out: Outcome, decided: list, notes: list) -> Outcome:
+        """The writes, the append and the thread re-check, as one command on the ledger (§8.2)."""
         with self.ledger.conn.transaction():
             if not self.ledger.add_message(msg):
                 out.replay = True
@@ -585,6 +593,7 @@ class MailIngest:
         reasons = self.reasons().get(claim_id, set())
         self.ledger.log("reviewer", "reviewed", why, claim=claim_id, signature=self.signature(claim_id, reasons))
 
+    @_held
     def review(self, limit: int = 20, sample: int | None = None) -> list[str]:
         """Re-check the head of the queue, one claim at a time; after a change the queue is read
         again, since a correction can settle other entries. Then re-check a small random sample of
@@ -619,6 +628,7 @@ class MailIngest:
                 changed.append(r)
         return changed
 
+    @_held
     def release_holds(self, now: str) -> list[str]:
         """Past `hold_until`, stop watching the thread. The claim stays written, flagged, and in
         the review queue."""

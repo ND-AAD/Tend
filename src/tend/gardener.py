@@ -11,6 +11,7 @@ from . import confidence, ids
 from .config import Config
 from .ledger import Ledger, normalise
 from .llm import Judge
+from .projector import holding
 from .schema import RESOLVABLE_KINDS
 
 JACCARD_MIN = 0.6
@@ -136,6 +137,7 @@ def _evidence(ledger: Ledger, item_id: str) -> dict:
             "claims": claims[-10:]}
 
 
+@holding(lambda ledger, cfg, projector, *a, **k: projector)
 def run(ledger: Ledger, cfg: Config, projector, judge: Judge, limit: int = 10) -> list[tuple[str, str, str]]:
     """Judge the top pairs and merge each `same` pair into the older Item. The rebuild that
     applies the merges is the caller's (the nightly batch, or the next list)."""

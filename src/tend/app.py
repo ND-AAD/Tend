@@ -17,11 +17,12 @@ class App:
         self.ledger = Ledger(self.conn)
         self.ledger.install()
         self.projector = Projector(self.conn, self.ledger, cfg)
-        self.projector.initialise()
-        # reconcile on startup: a process killed between a ledger commit and its append left the
-        # store behind the ledger (SPEC §8.2)
-        if self.ledger.unprojected():
-            self.projector.refresh("startup")
+        with self.projector.exclusive():
+            self.projector.initialise()
+            # reconcile on startup: a process killed between a ledger commit and its append left
+            # the store behind the ledger (SPEC §8.2)
+            if self.ledger.unprojected():
+                self.projector.refresh("startup")
 
     @property
     def session(self):
@@ -31,6 +32,10 @@ class App:
         return MailIngest(self.cfg, self.ledger, self.projector, extractor, resolver)
 
     def brief(self, cutoff: str = "now") -> brief.Brief:
+        with self.projector.exclusive():       # a rebuild by another command cannot swap mid-read
+            return self._brief(cutoff)
+
+    def _brief(self, cutoff: str) -> brief.Brief:
         """The morning list. Pending corrections, merges and out-of-order arrivals are applied by
         one rebuild first, so the list never shows a reading the assistant has already revised.
         If that rebuild fails the list is still served, from the previous projection, and says so."""
@@ -55,8 +60,14 @@ class App:
         if kind not in ("snooze", "withdraw"):
             raise ValueError(kind)
         act_id = "oa-" + ids._h(kind, claim_id, at)
-        self.ledger.add_owner_act(act_id, kind, {"claim": claim_id}, at, until, note)
-        self.projector.project_owner_act(self.ledger.owner_acts_by_id(act_id))
+        with self.projector.exclusive():
+            # recorded with its unprojected marker in one transaction: a kill before the
+            # projection completes is repaired by the next command (Z4, §8.2)
+            with self.conn.transaction():
+                self.ledger.add_owner_act(act_id, kind, {"claim": claim_id}, at, until, note)
+                self.ledger._q("INSERT INTO ledger.unprojected VALUES (%s) ON CONFLICT DO NOTHING", (act_id,))
+            self.projector.project_owner_act(self.ledger.owner_acts_by_id(act_id))
+            self.ledger.mark_projected(act_id)
         return act_id
 
     def close(self) -> None:

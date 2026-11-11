@@ -11,6 +11,7 @@ import pytest
 from tend.app import App
 from tend.config import Config
 
+os.environ.setdefault("TEND_LOCK_WAIT", "2")     # a second command in one test fails fast
 ADMIN = os.environ.get("TEND_TEST_DSN", "postgresql://tend:tend@localhost/tend_dev")
 OWNER = "person:nick@example.com"
 

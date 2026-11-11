@@ -7,6 +7,7 @@ from datetime import datetime
 from . import ids, instants
 from .config import Config
 from .ledger import Claim, Ledger
+from .projector import holding
 
 EXTRACTOR = "github-v1"
 
@@ -165,6 +166,7 @@ def _store(ledger: Ledger, msg: dict, claims: list[Claim], event_name: str, payl
         ledger.link(msg["thread_id"], msg["producer_id"], msg["sent_at"])
 
 
+@holding(lambda event_name, payload, cfg, ledger, projector, *a, **k: projector)
 def ingest(event_name: str, payload: dict, cfg: Config, ledger: Ledger, projector) -> str | None:
     """Invariant: the claims of a subject's events do not depend on the order they arrive in.
     The mapping reads what stands from the ledger, so an event dated before the subject's latest

@@ -5,7 +5,11 @@ projection schema; a rebuild replays the whole ledger into a fresh schema, check
 transition check (9.5.8), and swaps it in (deviations D1 to D3 live here, at the boundary)."""
 from __future__ import annotations
 
+import functools
 import json
+import os
+import time
+from contextlib import contextmanager
 from pathlib import Path
 
 import attedra_ref.api
@@ -38,6 +42,26 @@ class RebuildFailed(Exception):
 
 MAX_QUARANTINE = 5     # records one rebuild may set aside before it gives up
 
+LOCK_KEY = 0x7E4D0001  # the advisory lock serialising every command on one ledger (SPEC §8.2)
+
+
+def holding(projector_of):
+    """Run the decorated call inside `Projector.exclusive()`; `projector_of` gets the call's arguments."""
+    def deco(fn):
+        @functools.wraps(fn)
+        def wrapper(*a, **k):
+            with projector_of(*a, **k).exclusive():
+                return fn(*a, **k)
+        return wrapper
+    return deco
+
+
+_self = holding(lambda self, *a, **k: self)
+
+
+class Busy(RuntimeError):
+    """Another Tend command holds the ledger. Nothing was recorded; run the command again."""
+
 
 class Projector:
     def __init__(self, conn, ledger: Ledger, config: Config) -> None:
@@ -46,9 +70,42 @@ class Projector:
         self.config = config
         self.session = Session(conn)
         self._current: str | None = None
+        self._held = 0
+        self.lock_wait = float(os.environ.get("TEND_LOCK_WAIT", "300"))
         schema = ledger.meta("projection_schema")
         if schema:
             self._use(schema)
+
+    # -- one command at a time (SPEC §8.2) ------------------------------------------------------
+    @contextmanager
+    def exclusive(self):
+        """Hold the ledger for one command: every write to the ledger, append, rebuild and list
+        read runs inside it. Session-level, so a killed process releases it; re-entrant within one
+        process. On taking it, follow the projection another command may have swapped in."""
+        if self._held:
+            self._held += 1
+            try:
+                yield
+            finally:
+                self._held -= 1
+            return
+        deadline = time.monotonic() + self.lock_wait
+        with self.conn.cursor() as c:
+            while not c.execute("SELECT pg_try_advisory_lock(%s)", (LOCK_KEY,)).fetchone()[0]:
+                if time.monotonic() >= deadline:
+                    raise Busy(f"another Tend command has held the ledger for {self.lock_wait:.0f}s")
+                time.sleep(0.05)
+        self._held = 1
+        try:
+            current = self.ledger.meta("projection_schema")
+            if current and current != getattr(self, "schema", None):
+                self._use(current)
+            yield
+        finally:
+            self._held = 0
+            if not self.conn.closed:
+                with self.conn.cursor() as c:
+                    c.execute("SELECT pg_advisory_unlock(%s)", (LOCK_KEY,))
 
     # -- schema management -------------------------------------------------------------------
     def _use(self, schema: str) -> None:
@@ -174,6 +231,7 @@ class Projector:
             "@party": R(self._person(c.party_id)), "@issuance": R(E), "@basis": [m["artifact"]]})
 
     # -- owner acts (SPEC §8.3, deviation D3) ---------------------------------------------------
+    @_self
     def project_owner_act(self, a: dict) -> bool:
         target = self.ledger.successor(a["target"].get("claim", ""))
         tc = self.ledger.claim(target) if target else None
@@ -198,6 +256,7 @@ class Projector:
         return True
 
     # -- appending one message (SPEC §8.2, last paragraph) ---------------------------------------
+    @_self
     def append(self, message_id: str) -> None:
         """Project one newly committed message into the live store (SPEC §8.2, last paragraph).
 
@@ -221,6 +280,7 @@ class Projector:
         else:
             self.ledger.set_meta("latest_sent_at", m["sent_at"])
 
+    @_self
     def refresh(self, agent: str = "tend") -> str | None:
         """Rebuild if the ledger has changes the store does not show yet: a pending rewrite
         (stale) or a message whose append did not complete (unprojected)."""
@@ -230,6 +290,7 @@ class Projector:
             return self.rebuild(agent, "messages not yet projected")
         return None
 
+    @_self
     def settle(self, agent: str = "tend") -> None:
         """Before a rewrite: make the store show every recorded message, so that the rebuild
         applying the rewrite compares against a projection that held everything (the visibility
@@ -248,6 +309,7 @@ class Projector:
         self.ledger.set_meta("quarantine", json.dumps(q, sort_keys=True))
         self.ledger.log(agent, "quarantined", why[:2000], record=record_id)
 
+    @_self
     def release_quarantine(self, agent: str = "owner") -> list[str]:
         """Try the set-aside records again at the next rebuild (after a fix)."""
         q = list(self.quarantined())
@@ -258,6 +320,7 @@ class Projector:
         return q
 
     # -- rebuild (SPEC §8.2) -------------------------------------------------------------------
+    @_self
     def rebuild(self, agent: str = "tend", reason: str = "") -> str:
         """Invariant: one record that cannot be projected costs that record, never the list. A
         replay that fails on a message or owner act sets it aside (quarantine, shown on the list)
@@ -318,8 +381,19 @@ class Projector:
         between the old and the new at "now" is exactly what the rewrites did. Each difference is
         logged `obligation_changed`, and the list shows it (§10)."""
         why = self._why(since) or ["a rebuild"]
+
+        def same_obligation(c):
+            x = self.ledger.claim(c)
+            return x and (self.ledger.root(x.subject_id), x.property, x.obligated_id, x.party_id)
+        # a request ended and the same obligation opened by another claim (a re-derived GitHub
+        # event, Z3) is unchanged for the owner
+        reopened = {same_obligation(c) for c in after if c not in before}
+        # the owner's own withdrawals are not rewrites (an act a kill left unprojected, Z4)
+        withdrawn = {a["target"].get("claim") for a in self.ledger.owner_acts() if a["kind"] == "withdraw"}
         for cid, subject in before.items():
             now = self.ledger.successor(cid)
+            if now not in after and (same_obligation(cid) in reopened or {cid, now} & withdrawn):
+                continue
             if now in after:
                 if self.ledger.root(after[now]) != self.ledger.root(subject):
                     self.ledger.log(agent, "obligation_changed", "; ".join(why), claim=cid, now_claim=now,
@@ -352,17 +426,36 @@ class Projector:
                 self._use(old)
             self.ledger.log(agent, "rebuild_failed", f"{type(e).__name__}: {e}"[:2000], schema=new, record=culprit)
             raise RebuildFailed(str(e), culprit) from e
-        after = self.open_now()
-        self.ledger.set_meta("projection_schema", new)
-        self.ledger.set_meta("stale", "0")
-        self.ledger.mark_projected()
-        self.ledger.set_meta("stale_reason", "")
-        if old:
+        # the swap, the markers, the change entries and the rebuild log commit together: a kill
+        # before the commit leaves the old projection in use and the ledger still stale, so the
+        # next rebuild redoes all of it; after the commit the entries exist (Z2, §8.2)
+        try:
+            after = self.open_now()
+            with self.conn.transaction():
+                self.ledger.set_meta("projection_schema", new)
+                self.ledger.set_meta("stale", "0")
+                self.ledger.mark_projected()
+                self.ledger.set_meta("stale_reason", "")
+                self._record_changes(before, after, since, agent)
+                self.ledger.log(agent, "rebuild", reason or None, schema=new)
+        except BaseException as e:      # an interruption too: the old projection stays in use
             with self.conn.cursor() as c:
-                c.execute(f'DROP SCHEMA IF EXISTS "{old}" CASCADE')
-        self._record_changes(before, after, since, agent)
-        self.ledger.log(agent, "rebuild", reason or None, schema=new)
+                c.execute(f'DROP SCHEMA IF EXISTS "{new}" CASCADE')
+            if old:
+                self._use(old)
+            if not isinstance(e, Exception):
+                raise
+            raise RebuildFailed(f"{type(e).__name__}: {e}") from e
+        self._drop_other_projections(new)
         return new
+
+    def _drop_other_projections(self, keep: str) -> None:
+        """After a committed swap: the old projection, and any left by a rebuild killed before its
+        commit, are no longer referenced."""
+        with self.conn.cursor() as c:
+            for (name,) in c.execute("SELECT nspname FROM pg_namespace WHERE nspname LIKE 'proj\\_%%' AND nspname <> %s",
+                                     (keep,)).fetchall():
+                c.execute(f'DROP SCHEMA IF EXISTS "{name}" CASCADE')
 
     def _replay(self) -> None:
         skip = self.quarantined()
