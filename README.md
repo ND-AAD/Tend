@@ -57,6 +57,12 @@ tend brief
 Mail input is JSON: `{"id", "thread_id", "from", "to", "cc", "sent_at", "body", "url"}`. The body is
 read and discarded; only the quoted evidence of each claim is kept.
 
+## Known limits
+
+- Extraction quality on real mail has not been measured. Every mail test uses scripted extractor and resolver fakes, so they check what Tend does with a proposal, not whether the model proposes the right thing.
+- The production extraction prompt (`llm.ClaudeExtractor`) has not been run. Neither have the resolver and gardener prompts. No call to the Anthropic API has been made.
+- The nightly review and the gardener hold the ledger lock across model calls, so a command that arrives meanwhile may exit with `Busy` and must be run again (issue #18).
+
 ## Attedra
 
 `vendor/attedra` holds Attedra 0.1.0 (specification, reference engine, schema) unmodified, pinned
