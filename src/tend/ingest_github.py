@@ -79,9 +79,33 @@ def map_event(event_name: str, payload: dict, cfg: Config, ledger: Ledger) -> tu
             if target.property != keep:
                 add("withdrawal", target.property, {"claim": target.id}, party_id=_person(cfg, sender))
 
+    def here(prop: str) -> bool:
+        return any(c.kind == "commitment" and c.property == prop for c in claims)
+
+    def standing(prop: str) -> bool:
+        """Whether GitHub still has the owner assigned (prop `resolved`) or as a requested reviewer
+        (prop `review_by_owner`). Read from the payload when it says, else from the ledger: the last
+        assignment or request was not removed, and for a review, not yet answered by one."""
+        people = [x.get("login", "") for x in obj.get("assignees" if prop == "resolved" else "requested_reviewers") or []]
+        if prop == "resolved" and obj.get("assignees") is not None or prop == "review_by_owner" and \
+                obj.get("requested_reviewers") is not None:
+            return any(_person(cfg, x) == owner for x in people)
+        state = False
+        for c, m in sorted(ledger.message_claims(), key=lambda cm: instants.sort_key(cm[1]["sent_at"])):
+            if c.subject_id != subject or c.property != prop:
+                continue
+            act = m["provider_id"].split(":")[3] if m["provider_id"].count(":") >= 3 else ""
+            if c.kind == "commitment":
+                state = True
+            elif c.kind == "withdrawal" and act in ("unassigned", "review_request_removed"):
+                state = False
+            elif c.kind == "statement" and prop == "review_by_owner" and m["producer_id"] == owner:
+                state = False
+        return state
+
     def await_owner() -> None:
         """A pull request you opened or were assigned waits on you to merge or close it."""
-        if not open_commitments("resolved"):
+        if not open_commitments("resolved") and not here("resolved"):
             add("commitment", "resolved", True, obligated_id=owner, party_id=_person(cfg, sender))
 
     if action in ("opened", "reopened"):
@@ -94,6 +118,12 @@ def map_event(event_name: str, payload: dict, cfg: Config, ledger: Ledger) -> tu
             add("statement", p, v)
         if is_pr and _person(cfg, obj["user"]["login"]) == owner:
             await_owner()
+        if action == "reopened":
+            # GitHub sends no new assigned or review_requested on reopen: what still stands returns
+            if standing("resolved") and not open_commitments("resolved") and not here("resolved"):
+                add("commitment", "resolved", True, obligated_id=owner, party_id=_person(cfg, sender))
+            if is_pr and standing("review_by_owner") and not open_commitments("review_by_owner"):
+                add("commitment", "review_by_owner", "submitted", obligated_id=owner, party_id=_person(cfg, sender))
     elif action == "closed":
         if is_pr:
             add("statement", "state", "merged" if obj.get("merged") else "closed")
