@@ -1,0 +1,10 @@
+[project]
+name = "attedra-ref"
+version = "0.1.0"
+description = "Reference implementation and conformance suite for the Attedra Specification 0.1.0 (preliminary)"
+requires-python = ">=3.12"
+dependencies = ["psycopg[binary]==3.3.6"]
+
+[tool.setuptools]
+package-dir = {"" = "reference"}
+packages = ["attedra_ref"]

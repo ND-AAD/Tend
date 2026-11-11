@@ -1,0 +1,125 @@
+"""Deterministic GitHub ingestion (SPEC §5.5). Input: GitHub webhook payloads with their event
+name, as delivered to a webhook or replayed from the events API. No model is involved."""
+from __future__ import annotations
+
+from datetime import datetime
+
+from . import ids, instants
+from .config import Config
+from .ledger import Claim, Ledger
+
+EXTRACTOR = "github-v1"
+
+
+def _instant(ts: str) -> str:
+    return instants.from_datetime(datetime.fromisoformat(ts.replace("Z", "+00:00")))
+
+
+def _person(cfg: Config, login: str) -> str:
+    return cfg.owner_for(ids.person_gh(login))
+
+
+def map_event(event_name: str, payload: dict, cfg: Config, ledger: Ledger) -> tuple[dict, list[Claim]] | None:
+    """Return the ledger message and its claims, or None when the event carries nothing we map.
+    Unmapped events still return a message with no claims, so the log is complete."""
+    repo = payload["repository"]["full_name"]
+    action = payload.get("action", "")
+    sender = payload["sender"]["login"]
+    obj = payload.get("pull_request") or payload.get("issue")
+    if obj is None:
+        return None
+    is_pr = "pull_request" in payload
+    n = obj["number"]
+    subject = ids.pr(repo, n) if is_pr else ids.issue(repo, n)
+    kind = "pr" if is_pr else "issue"
+    url = obj.get("html_url", "")
+    if event_name == "pull_request_review":
+        when, eid = payload["review"]["submitted_at"], f"{repo}:review:{payload['review']['id']}"
+    else:
+        when = obj.get("updated_at") or obj.get("created_at")
+        eid = f"{repo}:{event_name}:{n}:{action}:{when}"
+        if action in ("review_requested", "review_request_removed", "assigned", "unassigned"):
+            target = payload.get("requested_reviewer") or payload.get("assignee") or {}
+            eid += ":" + target.get("login", "")
+    msg = {
+        "id": ids.event("gh", eid), "provider": "gh", "provider_id": eid,
+        "thread_id": ids.thread("gh", f"{repo.lower()}/{n}"), "stream_id": ids.gh_log(repo),
+        "producer_id": _person(cfg, sender), "recipients": [], "sent_at": _instant(when),
+        "artifact": {"@ref": "artifact", "id": url or eid, "edition": when},
+    }
+    ledger.ensure_item(subject, kind, obj.get("title"), keys=[subject, url.lower()] if url else [subject])
+    owner = cfg.owner_id
+    claims: list[Claim] = []
+
+    def add(kind_: str, prop: str, value, **kw) -> Claim:
+        c = Claim(id=ids.claim(msg["id"], len(claims), EXTRACTOR), message_id=msg["id"], ordinal=len(claims),
+                  kind=kind_, subject_id=subject, property=prop, value=value, extractor=EXTRACTOR, **kw)
+        claims.append(c)
+        return c
+
+    def open_commitments(prop: str | None = None) -> list[Claim]:
+        """Active commitments of the owner on this subject not yet met by a later owner statement."""
+        pairs = ledger.message_claims()
+        out = []
+        for c, m in pairs:
+            if c.kind != "commitment" or c.subject_id != subject or cfg.owner_for(c.obligated_id) != owner \
+                    or (prop and c.property != prop):
+                continue
+            if any(s.kind == "statement" and s.subject_id == subject and s.property == c.property
+                   and s.value == c.value and sm["producer_id"] == owner
+                   and instants.sort_key(sm["sent_at"]) >= instants.sort_key(m["sent_at"]) for s, sm in pairs):
+                continue
+            if any(w.kind == "withdrawal" and ledger.successor(w.value["claim"]) == c.id for w, _ in pairs):
+                continue
+            out.append(c)
+        return out
+
+    def withdraw_all(prop: str | None = None) -> None:
+        for target in open_commitments(prop):
+            add("withdrawal", target.property, {"claim": target.id}, party_id=_person(cfg, sender))
+
+    if action in ("opened", "reopened"):
+        vals = {"state": "open", "title": obj["title"], "author": obj["user"]["login"]}
+        if not is_pr and action == "reopened":
+            vals["resolved"] = False
+        for p, v in vals.items():
+            add("statement", p, v)
+    elif action == "closed":
+        if is_pr:
+            add("statement", "state", "merged" if obj.get("merged") else "closed")
+            withdraw_all()       # nothing remains to review on a closed or merged pull request
+        else:
+            add("statement", "state", "closed")
+            if _person(cfg, sender) == owner:
+                add("statement", "resolved", True)
+            else:
+                # closed by someone else: the task assigned to you ended without your evidence
+                add("statement", "resolved", True)
+                withdraw_all()
+    elif action == "review_requested" and _person(cfg, payload["requested_reviewer"]["login"]) == owner:
+        add("commitment", "review_by_owner", "submitted", obligated_id=owner, party_id=_person(cfg, sender))
+    elif action == "review_request_removed" and _person(cfg, payload["requested_reviewer"]["login"]) == owner:
+        withdraw_all("review_by_owner")
+    elif event_name == "pull_request_review" and action == "submitted" and _person(cfg, sender) == owner:
+        add("statement", "review_by_owner", "submitted")
+    elif event_name == "issues" and action == "assigned" and _person(cfg, payload["assignee"]["login"]) == owner:
+        add("commitment", "resolved", True, obligated_id=owner, party_id=_person(cfg, sender))
+    elif event_name == "issues" and action == "unassigned" and _person(cfg, payload["assignee"]["login"]) == owner:
+        withdraw_all("resolved")
+    return msg, claims
+
+
+def ingest(event_name: str, payload: dict, cfg: Config, ledger: Ledger, projector) -> str | None:
+    mapped = map_event(event_name, payload, cfg, ledger)
+    if mapped is None:
+        return None
+    msg, claims = mapped
+    with ledger.conn.transaction():
+        if not ledger.add_message(msg):
+            return msg["id"]          # replay: already ingested
+        for c in claims:
+            ledger.add_claim(c)
+            ledger.link(msg["thread_id"], c.subject_id, msg["sent_at"])
+            ledger.link(msg["thread_id"], msg["producer_id"], msg["sent_at"])
+    projector.append(msg["id"])
+    return msg["id"]

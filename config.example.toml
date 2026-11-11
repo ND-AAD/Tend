@@ -1,0 +1,11 @@
+# Copy to config.toml. The Anthropic key is read from ANTHROPIC_API_KEY and never stored here.
+owner_id = "person:you@example.com"
+owner_identifiers = ["person:you@example.com", "person:gh:your-login"]
+database_url = "postgresql://assistant:assistant@localhost/assistant_dev"
+setup_at = "2026-11-01-08:00"
+
+[models]
+extractor = "claude-opus-5-5"
+gardener = "claude-opus-5-5"
+triage = "claude-opus-5-5"
+effort = "high"

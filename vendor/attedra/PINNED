@@ -1,0 +1,3 @@
+Vendored from ND-AAD/Attedra at commit 74b3fea (Attedra 0.1.0, preliminary): the specification, the
+reference engine and its schema. Unmodified. Tend's deviations from the specification are listed in
+SPEC.md section 2, as the Apache 2.0 license requires for changed use.
