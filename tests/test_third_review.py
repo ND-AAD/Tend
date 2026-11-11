@@ -157,7 +157,10 @@ def test_V4_confident_wrong_pick_is_rewritten_on_evidence(app):
     changed = nightly.review(sample=0)
     assert app.ledger.claim(cid).status == "superseded"
     assert app.ledger.claim(changed[0]).subject_id == v2
-    assert lines(app, "2026-11-12T09:00-08:00") == []
+    b = app.brief("2026-11-12T09:00-08:00")
+    assert [(l.section, l.text) for l in b.lines] == [("Changed by my re-checks",
+        'Deliver: Acme deck v2 (was Acme deck v1), asked by ann@acme.com; '
+        'I re-read "could you send me the deck by Friday" as about Acme deck v2')]   # closed, and shown
     assert nightly.review_queue() == []                      # the oddity is gone, nothing left to check
 
 

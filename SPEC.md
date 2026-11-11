@@ -119,7 +119,15 @@ Deterministic, no model. Source is `ghlog:<repo>`; the self-description's `@prod
 
 An open commitment is an active commitment of the owner on the subject with no later owner statement of the same property and value and no withdrawal of it.
 
+| PR or issue reopened, still assigned to the owner or with the owner's review still requested | the commitment returns: GitHub sends no new `assigned` or `review_requested` on reopen. What still stands is read from the payload's `assignees` / `requested_reviewers` when present, else from the ledger |
+
+A comment on a pull request arrives as an `issue` carrying a `pull_request` link; it maps to the pull request's Item, never to an issue Item.
+
+An open commitment is an active commitment of the owner on the subject with no later owner statement of the same property and value and no withdrawal of it.
+
 Events not in this table are stored in `messages` and produce no claims.
+
+Arrival order does not matter. Each event's payload is kept (`ledger.payloads`). An event dated before the latest stored event of its subject is mapped against the ledger as it stood at its time: the later events' claims are removed, the early event is mapped, and the later ones are mapped again from their payloads in event-time order, in one transaction (revision `rederived`; the store is marked stale). Claim ids are deterministic, so owner acts and withdrawals naming them still apply.
 
 ## 6. Mail extraction
 
@@ -242,6 +250,8 @@ Any operation marks the projection stale. `rebuild()` runs after a batch of oper
 
 Appending a new message (`append`) runs step 3 for that message only, against the live schema. Reads at "now" are then correct. Two cases also mark the ledger stale (`meta.stale`, with `stale_reason`): a message older than the latest one projected, whose live Connections would keep a later first-seen instant, and a failed append, which re-raises with the message kept in the ledger. Supersessions, drops, merges and unmerges mark it stale too. Nothing rebuilds inside ingestion: a rebuild costs a full replay. `refresh()` rebuilds when stale and runs before every morning list and at the end of the nightly batch. Any exception during a rebuild, not only a write error, restores the previous projection.
 
+Invariant: no automated rewrite (re-check, correction, merge, unmerge, drop, a record set aside, a re-derived event) ends or moves an open obligation without a visible entry on the list saying what changed and why. It is enforced once, at the rebuild that applies the rewrites: every live append and owner act is already in the old projection, so the open expectations at "now" before and after the rebuild differ exactly by what the rewrites did. Each request open before and not open after (closed), or open after on another Item (moved), is logged `obligation_changed` with the rewrites recorded since the previous rebuild, in words, and listed under "Changed by my re-checks" (§10). One whose message is set aside cannot be grounded and is shown as a note instead.
+
 Invariant: one record that cannot be projected costs that record, never the list. A rebuild that fails while replaying a message or owner act puts it in quarantine (`meta.quarantine`, revision `quarantined`) and tries again, up to `MAX_QUARANTINE` records. Quarantined records are skipped on replay and named on the list as set aside. `tend rebuild` releases the quarantine and retries everything (after a fix). A failure no record can be blamed for (the transition check, the fixed records) keeps the previous projection, and the list is served from it with the note "this list may be out of date".
 
 ### 8.3 Owner acts across rebuilds (D3)
@@ -253,6 +263,8 @@ An owner act's `target` is a key: `{"claim": <claim id>}` for an expectation. At
 `reresolve(claim)` re-runs §7.2 for a claim's mention with a fresh pack.
 
 Invariant: a re-check sees the store as if the claim had not been placed. Inside a transaction that is rolled back, the claim is hidden, its message's names on its subject are removed (unless another claim of the message is on that subject), and so is its thread's link to the subject (unless another claim from the thread is about it). Without this, the name a guess recorded makes the guess look named, and the link it made makes it look supported. The current subject is always among the candidates, on its other evidence, so that a move is a choice against it. An Item with no evidence besides the claim is offered too, and a vote for it counts as a vote for a new Item of its label, which is what it is.
+
+Invariant: a confident reading is overturned only on positive contradicting evidence: the queue's `displaced`, `conflict` or `merged` (`EVIDENCE`). A re-check without it (the random sample, a shared name) that disagrees with a confident claim makes it a best reading and moves nothing; a later confident answer on changed evidence may then move it. A best reading may be moved by any confident answer. A statement that meets a request on its own Item among the same people is explained by that request and is not evidence of displacement for another.
 
 Outcomes:
 
@@ -268,8 +280,8 @@ Triggers. Self-correction is triggered by evidence as well as doubt: a confident
    - doubt: `best_reading` (flag `low_confidence`), `shared_name` (its resolving name is now on two active Items of its kind);
    - evidence, whatever the claim's confidence: `displaced` (an open request on A, and a later statement on another Item of A's kind that says what was asked, in the same thread or among the same non-owner people: the request may have been placed on the wrong Item, or the statement may have been), `conflict` (Attedra's `conflicts` read on the claim's subject finds sources disagreeing on its property), `merged` (its Item was absorbed by a merge).
    Evidence entries come first, then doubt; within each, lowest confidence first. After a change the queue is read again, since one correction can settle other entries.
-3. Memory: every re-check logs `reviewed` with a signature of what it rested on (the reasons, the subject, the flags, and the pack the resolver would be shown). A claim whose signature is unchanged is not re-checked, so the queue moves on instead of re-asking the same claims every night.
-4. A backstop sample: each night `SAMPLE` = 2 confident mail claims never re-checked, chosen at random, are re-checked. It finds wrong picks no evidence has reached yet, and gives a measured rate of confident errors.
+3. Memory: every re-check logs `reviewed` with a signature of what it rested on (the reasons, the subject, the flags, the pack the resolver would be shown, and each candidate's structural support). A claim whose signature is unchanged is not re-checked, so the queue moves on instead of re-asking the same claims every night.
+4. A backstop sample: each night `SAMPLE` = 2 confident mail claims never re-checked, chosen at random, are re-checked (without the power to move them, above). It finds wrong picks no evidence has reached yet, and gives a measured rate of confident errors.
 5. The gardener's merges (§9).
 
 The nightly batch is: `release_holds`, `review`, gardener `run`, then one `refresh`.
@@ -294,10 +306,11 @@ Pairs with equal scores are ordered by the number of best readings (`low_confide
 2. **Your commitments**: other open entries obligated on the owner (`elig:<owner>`), asks first.
 3. **Waiting on others**: open entries obligated on anyone else.
 4. **Coming up**: `upcoming` entries.
-5. **Closed on my best reading**: requests no longer open only because best-reading statements (`low_confidence`) said what was asked. The closing is real in the store; the line quotes the statement and who sent it.
-6. **Could not place**: requests the audit refused (§6.3), with the sender's words, date and why. Refused statements are counted in a note, not listed. A refusal for `quote_not_in_body` is not shown: the words are the extractor's, not the sender's.
+5. **Changed by my re-checks**: every request a rewrite ended or moved (§8.2), with what changed and why, for `RECENT_DAYS` from the rewrite.
+6. **Closed on my best reading**: requests no longer open only because best-reading statements (`low_confidence`) said what was asked. The closing is real in the store; the line quotes the statement and who sent it.
+7. **Could not place**: requests the audit refused (§6.3), with the sender's words, date and why. Refused statements are counted in a note, not listed. A request refused for `quote_not_in_body` is named by sender and date without the words, which are the extractor's, not the sender's.
 
-Sections 5 and 6 show the last `RECENT_DAYS` = 14 days (rule `recent-v1`). Notes above the sections name records set aside by quarantine and say when the list may be out of date (§8.2). The list never hides what Tend read: an item is either open, closed on evidence, closed on a guess that says so, or could not be placed.
+Sections 6 and 7 show the last `RECENT_DAYS` = 14 days (rule `recent-v1`). Notes above the sections name records set aside by quarantine and say when the list may be out of date (§8.2). The list never hides what Tend read: an item is either open, closed on evidence, closed on a guess that says so, or could not be placed.
 
 Quiet work (rule `quiet-v2`, `brief.QUIET_DAYS` = 7): a line whose subject no recorded message has touched for at least 7 days at the cutoff gets ", untouched for N days". A message touches a subject when it carries a claim about it or is in a thread linked to it (a review, a push or a reply that maps to no claim still counts). Activity is read once per list. It is derived at read time from the ledger, changes no section, and is never written to the store as a deadline; overdue stays the store's own standing.
 
@@ -319,6 +332,7 @@ Real PostgreSQL, no mocks of the engine. Model calls go through `llm.Resolver` a
 6. Rebuild reproduces an identical store (same Items, Assertions and Connections) from an unchanged ledger.
 7. Merge: two Items split across two threads are merged by the gardener; after rebuild one expectation is fulfilled by evidence that was attached to the other.
 8. Owner acts survive a rebuild that supersedes the target claim, and are dropped when the target is dropped.
-9. Rebuild failure of any kind keeps the previous projection; a failed append is repaired by the next refresh; out-of-order arrival gives the same store as a rebuild.
+9. Rebuild failure of any kind keeps the previous projection; a failed append is repaired by the next refresh; a mail message arriving out of order gives the same store as a rebuild; GitHub events give the same list in any arrival order (§5.5).
 10. The third review's findings (tests/test_third_review.py): reopened work returns; informed votes count; an exact key wins and the vocabulary refuses; a confident wrong pick is rewritten on evidence; a re-check does not see its own footprint; the queue remembers; a request closed on a guess, a refused request and an unchecked deadline are shown; a client's name is not identity; a poison record is quarantined; a wrong merge is undone; quiet counts every recorded message.
+11. The fourth review (tests/test_fourth_review.py): the visibility invariant as a property over every rewrite path (a moved request, a statement moved onto a request, a merge, an unmerge, a drop, a set-aside record, an evidence re-check, the sample, a re-derived GitHub event); the sample never moves a confident request; a delivery that meets its own request is not evidence; a request with a non-verbatim quote is named; a comment on a pull request is the pull request; five arrival orders of one issue's events give one list; closed history costs the list nothing.
 10. From the second review: a re-requested review reappears; a merged PR, or an issue closed by someone else, leaves the list; a reopened and reassigned issue returns; evidence before `setup_at` qualifies; candidates are filtered by kind; a colliding name never drops a request; the review queue rewrites a confident pick made doubtful; the gardener ignores a shared correspondent and remembers its verdicts.

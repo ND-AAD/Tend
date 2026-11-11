@@ -19,6 +19,7 @@ from .llm import Extractor, Resolver
 
 EXTRACTOR = "mail-v1"
 HOLD_HOURS = 72
+EVIDENCE = {"displaced", "conflict", "merged"}     # reasons that may overturn a confident reading
 SAMPLE = 2          # confident claims re-checked at random each night, never-checked first
 _WROTE = re.compile(r"^\s*On .+wrote:\s*$")
 _STOP = {"the", "a", "an", "of", "for", "and", "to", "my", "our", "this", "that", "new", "revised", "final", "draft"}
@@ -355,7 +356,8 @@ class MailIngest:
         return {"text": r[0][0] if r else (it.get("label") or ""), "kind": it.get("kind"), "label": it.get("label"),
                 "resolution": "unsure", "item_id": "", "why": "re-resolution"}
 
-    def reresolve(self, claim_id: str, agent: str, mention: dict | None = None) -> str | None:
+    def reresolve(self, claim_id: str, agent: str, mention: dict | None = None,
+                  evidence: bool = True) -> str | None:
         """Re-run resolution for one claim with a fresh pack (SPEC §8.4). Returns the claim id now
         in force when the answer is confident (the same claim when it confirms the subject), or
         None when it is not.
@@ -367,7 +369,13 @@ class MailIngest:
         A confident answer that names an Item the gardener absorbed undoes that merge (§9.3). A
         confident answer whose subject cannot carry the property moves nothing. An unsure answer
         about a claim that was confident makes it a best reading: the evidence that queued it
-        stands, and the list should say so."""
+        stands, and the list should say so.
+
+        Invariant: a confident reading is overturned only on positive contradicting evidence
+        (`evidence`, from the queue's `displaced`, `conflict` or `merged`). A re-check without it,
+        such as the random sample or a shared name, that disagrees with a confident claim makes it
+        a best reading, shown as such, and never moves it. A best reading may be moved by any
+        confident answer. Every move or close that results is shown on the list (SPEC §8.2)."""
         c = self.ledger.claim(claim_id)
         if c is None or c.status != "active":
             return None
@@ -409,9 +417,17 @@ class MailIngest:
                     self.ledger.log(agent, "doubted", "re-check could not confirm a confident pick", claim=c.id,
                                     q=res.q)
                 return None
+            target = res.winner
+            moves = self.ledger.root(target) != self.ledger.root(c.subject_id) or \
+                bool((self.ledger.item(target) or {}).get("merged_into"))
+            if moves and not evidence and "low_confidence" not in c.flags:
+                self.ledger.update_claim(c.id, flags=sorted(set(c.flags) | {"low_confidence"}),
+                                         confidence=res.q.get(self.ledger.root(c.subject_id), 0.0))
+                self.ledger.log(agent, "doubted", "a re-check without contrary evidence disagreed; not moved",
+                                claim=c.id, q=res.q, winner=target)
+                return None
             self.ledger.drop_hold(c.id)
             flags = sorted(set(c.flags) - {"low_confidence"})
-            target = res.winner
             if (self.ledger.item(target) or {}).get("merged_into"):
                 was = self.ledger.root(target)
                 self.ledger.unmerge(target, agent, f"re-resolution of {c.id} names it apart from {was}")
@@ -474,6 +490,13 @@ class MailIngest:
         def people(m: dict) -> set[str]:
             return {m["producer_id"], *m["recipients"]} - {owner}
 
+        def explained(s: Claim, sm: dict) -> bool:
+            return any(k.kind == "commitment" and k.form == "value" and root[k.id] == root[s.id]
+                       and k.property == s.property and k.value == s.value
+                       and instants.sort_key(km["sent_at"]) <= instants.sort_key(sm["sent_at"])
+                       and (km["thread_id"] == sm["thread_id"] or people(km) & people(sm))
+                       for k, km in pairs)
+
         for c, m in pairs:
             if c.id not in mine:
                 continue
@@ -492,6 +515,8 @@ class MailIngest:
             if any(root[s.id] == root[c.id] for s, _ in after):
                 continue           # met where it was placed
             for s, sm in after:
+                if explained(s, sm):
+                    continue       # it meets a request on its own Item among the same people: no oddity
                 if kind[root[s.id]] == kind[root[c.id]] and \
                         (sm["thread_id"] == m["thread_id"] or people(sm) & people(m)):
                     add(c.id, "displaced")
@@ -509,13 +534,18 @@ class MailIngest:
         return out
 
     def signature(self, claim_id: str, why: set[str]) -> str:
-        """What a re-check of the claim would rest on: the reasons, the subject, and the pack the
-        resolver would be shown. Unchanged, a second re-check would give the same answer."""
+        """What a re-check of the claim would rest on: the reasons, the subject, the pack the
+        resolver would be shown, and each candidate's structural support. Unchanged, a second re-check would give the same answer."""
         c = self.ledger.claim(claim_id)
         msg = self.ledger.message(c.message_id)
         p = pack.build(self.ledger, msg, c.quote or "", self.cfg.owner_id)
+        owner = self.cfg.owner_id
+        anchors = {msg["thread_id"], msg["producer_id"], *msg["recipients"],
+                   *(self.ledger.root(i) for i in self.ledger.links_from(msg["thread_id"]))} - {owner}
+        edges = self.ledger.graph(exclude={owner})
         data = [sorted(why), self.ledger.root(c.subject_id), sorted(c.flags),
-                [[e["id"], e["names"], e["latest_claims"]] for e in p["items"]]]
+                [[e["id"], e["names"], e["latest_claims"], round(confidence.support(edges, e["id"], anchors), 3)]
+                 for e in p["items"]]]
         return ids._h(json.dumps(data, sort_keys=True, default=str))
 
     def _reviewed(self) -> dict[str, str]:
@@ -530,7 +560,7 @@ class MailIngest:
             if seen.get(cid) == self.signature(cid, why):
                 continue
             c = self.ledger.claim(cid)
-            evidence = bool(why & {"merged", "displaced", "conflict"})
+            evidence = bool(why & EVIDENCE)
             out.append((0 if evidence else 1, c.confidence, cid))
         return [cid for *_, cid in sorted(out)[:limit]]
 
@@ -547,23 +577,25 @@ class MailIngest:
         changed: list[str] = []
         done: set[str] = set()
         queue = self.review_queue(limit)
+        reasons = self.reasons()
         while queue and len(done) < limit:
             cid = queue.pop(0)
             if cid in done:
                 continue
             done.add(cid)
-            r = self.reresolve(cid, "reviewer")
+            r = self.reresolve(cid, "reviewer", evidence=bool(reasons.get(cid, set()) & EVIDENCE))
             self._remember(r or cid, "queue")
             if r:
                 changed.append(r)
                 if r != cid:
                     queue = [x for x in self.review_queue(limit) if x not in done]
+                    reasons = self.reasons()
         seen = self._reviewed()
         pool = sorted(c.id for c in self.ledger.active_claims()
                       if c.extractor == EXTRACTOR and "low_confidence" not in c.flags and c.id not in seen
                       and c.id not in done)
         for cid in random.Random(len(seen)).sample(pool, min(sample, len(pool))):
-            r = self.reresolve(cid, "reviewer")
+            r = self.reresolve(cid, "reviewer", evidence=False)
             self._remember(r or cid, "sample")
             if r and r != cid:
                 changed.append(r)

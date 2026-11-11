@@ -28,7 +28,8 @@ def map_event(event_name: str, payload: dict, cfg: Config, ledger: Ledger) -> tu
     obj = payload.get("pull_request") or payload.get("issue")
     if obj is None:
         return None
-    is_pr = "pull_request" in payload
+    # a comment on a pull request arrives as an issue carrying a `pull_request` link: same Item
+    is_pr = "pull_request" in payload or "pull_request" in obj
     n = obj["number"]
     subject = ids.pr(repo, n) if is_pr else ids.issue(repo, n)
     kind = "pr" if is_pr else "issue"
@@ -156,17 +157,52 @@ def map_event(event_name: str, payload: dict, cfg: Config, ledger: Ledger) -> tu
     return msg, claims
 
 
+def _store(ledger: Ledger, msg: dict, claims: list[Claim], event_name: str, payload: dict) -> None:
+    ledger.add_payload(msg["id"], event_name, payload)
+    for c in claims:
+        ledger.add_claim(c)
+        ledger.link(msg["thread_id"], c.subject_id, msg["sent_at"])
+        ledger.link(msg["thread_id"], msg["producer_id"], msg["sent_at"])
+
+
 def ingest(event_name: str, payload: dict, cfg: Config, ledger: Ledger, projector) -> str | None:
-    mapped = map_event(event_name, payload, cfg, ledger)
-    if mapped is None:
+    """Invariant: the claims of a subject's events do not depend on the order they arrive in.
+    The mapping reads what stands from the ledger, so an event dated before the subject's latest
+    one is mapped against the ledger as it stood at its time: the later events' claims are taken
+    out, the early event is mapped, and the later events are mapped again from their stored
+    payloads in event-time order (SPEC §5.5). Claim ids are deterministic, so owner acts and
+    withdrawals that name them still apply."""
+    first = map_event(event_name, payload, cfg, ledger)
+    if first is None:
         return None
-    msg, claims = mapped
+    msg = first[0]
     with ledger.conn.transaction():
-        if not ledger.add_message(msg):
+        if ledger.message(msg["id"]):
             return msg["id"]          # replay: already ingested
-        for c in claims:
-            ledger.add_claim(c)
-            ledger.link(msg["thread_id"], c.subject_id, msg["sent_at"])
-            ledger.link(msg["thread_id"], msg["producer_id"], msg["sent_at"])
+        later = [m for m in ledger.messages() if m["thread_id"] == msg["thread_id"] and m["provider"] == "gh"
+                 and instants.sort_key(m["sent_at"]) > instants.sort_key(msg["sent_at"])]
+        later.sort(key=lambda m: (instants.sort_key(m["sent_at"]), m["id"]))
+        if later:
+            stored = {m["id"]: ledger.payload(m["id"]) for m in later}
+            for m in later:
+                ledger.delete_claims(m["id"])
+            msg, claims = map_event(event_name, payload, cfg, ledger)
+            ledger.add_message(msg)
+            _store(ledger, msg, claims, event_name, payload)
+            for m in later:
+                if stored[m["id"]] is None:
+                    ledger.log("github", "rederive_skipped", "no stored payload", message=m["id"])
+                    continue
+                name, p = stored[m["id"]]
+                _, again = map_event(name, p, cfg, ledger)
+                for c in again:
+                    ledger.add_claim(c)
+            ledger.log("github", "rederived", "event arrived before later events of its subject",
+                       message=msg["id"], later=[m["id"] for m in later])
+            ledger.mark_stale(f"github event {msg['id']} arrived before later events")
+        else:
+            msg, claims = first
+            ledger.add_message(msg)
+            _store(ledger, msg, claims, event_name, payload)
     projector.append(msg["id"])
     return msg["id"]

@@ -42,6 +42,8 @@ CREATE TABLE IF NOT EXISTS ledger.revisions (
     action text NOT NULL, reason text, detail jsonb NOT NULL DEFAULT '{}');
 -- `via`: the absorbed Item a merge copied this row from (NULL for the Item's own rows), so that
 -- unmerge() removes exactly what the merge added
+CREATE TABLE IF NOT EXISTS ledger.payloads (
+    message_id text PRIMARY KEY, event_name text NOT NULL, payload jsonb NOT NULL);
 ALTER TABLE ledger.names ADD COLUMN IF NOT EXISTS via text;
 ALTER TABLE ledger.links ADD COLUMN IF NOT EXISTS via text;
 """
@@ -202,6 +204,32 @@ class Ledger:
                 (c.id, c.message_id, c.ordinal, c.kind, c.subject_id, c.property, Jsonb(c.value), c.form,
                  c.obligated_id, c.party_id, c.deadline, c.quote, c.confidence, Jsonb(c.flags), c.status,
                  c.extractor))
+
+    def add_payload(self, message_id: str, event_name: str, payload: dict) -> None:
+        """The deterministic sources' input, kept so their mapping can be re-derived (SPEC §5.5)."""
+        self._q("INSERT INTO ledger.payloads VALUES (%s,%s,%s) ON CONFLICT DO NOTHING",
+                (message_id, event_name, Jsonb(payload)))
+
+    def payload(self, message_id: str) -> tuple[str, dict] | None:
+        r = self._q("SELECT event_name, payload FROM ledger.payloads WHERE message_id=%s", (message_id,))
+        return (r[0][0], r[0][1]) if r else None
+
+    def delete_claims(self, message_id: str) -> None:
+        """Only for re-deriving a deterministic mapping, whose claims are regenerated with the
+        same ids in the same transaction."""
+        self._q("DELETE FROM ledger.claims WHERE message_id=%s", (message_id,))
+
+    def roots(self) -> dict[str, str]:
+        """Every Item id with its root, in one query (for reads that resolve many ids)."""
+        parent = dict(self._q("SELECT id, merged_into FROM ledger.items"))
+        out: dict[str, str] = {}
+        for i in parent:
+            x, seen = i, set()
+            while parent.get(x) and x not in seen:
+                seen.add(x)
+                x = parent[x]
+            out[i] = x
+        return out
 
     _CLAIM_COLS = ("id", "message_id", "ordinal", "kind", "subject_id", "property", "value", "form",
                    "obligated_id", "party_id", "deadline", "quote", "confidence", "flags", "status", "extractor")
@@ -390,9 +418,9 @@ class Ledger:
         return edges
 
     def revisions(self, action: str | None = None) -> list[dict]:
-        sql = "SELECT id, agent, action, reason, detail FROM ledger.revisions"
+        sql = "SELECT id, agent, action, reason, detail, at FROM ledger.revisions"
         args: tuple = ()
         if action:
             sql += " WHERE action=%s"
             args = (action,)
-        return [dict(zip(("id", "agent", "action", "reason", "detail"), r)) for r in self._q(sql + " ORDER BY id", args)]
+        return [dict(zip(("id", "agent", "action", "reason", "detail", "at"), r)) for r in self._q(sql + " ORDER BY id", args)]

@@ -258,8 +258,70 @@ class Projector:
                 self.quarantine(e.culprit, str(e), agent)
         raise AssertionError("unreachable")
 
+    # -- what a rewrite changed (SPEC §8.2, the visibility invariant) -----------------------
+    def open_now(self) -> dict[str, str]:
+        """Open and upcoming expectations at "now": claim id to subject."""
+        r = self.session.read("what_remains", {"frame": {"scope": ids.SCOPE, "cutoff": "now"},
+                                               "attention_filter": "ignore"})
+        out = {}
+        for e in r.get("open", []) + r.get("upcoming", []):
+            if e.get("kind") != "expectation":
+                continue
+            subject, ctx, _ = e["unit"].rpartition("#")[0].split("|")
+            out[ctx.removeprefix("expctx:")] = subject
+        return out
+
+    def _why(self, since: int) -> list[str]:
+        """The rewrites recorded since revision `since`, in words."""
+        out = []
+        for r in self.ledger.revisions():
+            if r["id"] <= since:
+                continue
+            d, a = r["detail"], r["action"]
+            if a == "supersede_claim":
+                c = self.ledger.claim(d.get("claim", ""))
+                subj = (d.get("changes") or {}).get("subject_id")
+                if c and subj:
+                    it = self.ledger.item(subj) or {}
+                    out.append(f'I re-read "{c.quote or c.property}" as about {it.get("label") or subj}')
+                else:
+                    out.append(r["reason"] or "I corrected a reading")
+            elif a == "merge_items":
+                lab = lambda i: (self.ledger.item(i) or {}).get("label") or i
+                out.append(f"I merged {lab(d['absorbed'])} into {lab(d['survivor'])}")
+            elif a == "unmerge_items":
+                out.append(f"I separated {(self.ledger.item(d['item']) or {}).get('label') or d['item']} again")
+            elif a == "drop_claim":
+                out.append(f"I dropped a reading ({r['reason']})")
+            elif a == "quarantined":
+                out.append("a record could not be stored and was set aside")
+            elif a == "rederived":
+                out.append("a GitHub event arrived out of order and I re-read its pull request or issue")
+        return list(dict.fromkeys(out))
+
+    def _record_changes(self, before: dict[str, str], after: dict[str, str], since: int, agent: str) -> None:
+        """Invariant: no automated rewrite ends or moves an open obligation without a visible
+        entry. Every live append and owner act is already in the old projection, so what differs
+        between the old and the new at "now" is exactly what the rewrites did. Each difference is
+        logged `obligation_changed`, and the list shows it (§10)."""
+        why = self._why(since) or ["a rebuild"]
+        for cid, subject in before.items():
+            now = self.ledger.successor(cid)
+            if now in after:
+                if self.ledger.root(after[now]) != self.ledger.root(subject):
+                    self.ledger.log(agent, "obligation_changed", "; ".join(why), claim=cid, now_claim=now,
+                                    change="moved", was_subject=subject, now_subject=after[now])
+            else:
+                self.ledger.log(agent, "obligation_changed", "; ".join(why), claim=cid, now_claim=now,
+                                change="closed", was_subject=subject)
+
     def _rebuild_once(self, agent: str, reason: str) -> str:
         old = self.ledger.meta("projection_schema")
+        try:
+            before = self.open_now() if old else {}
+        except Exception:
+            before = {}
+        since = max([r["id"] for r in self.ledger.revisions("rebuild")] or [0])
         n = int(old.split("_")[1]) + 1 if old else 1
         new = f"proj_{n}"
         self._current = None
@@ -277,12 +339,14 @@ class Projector:
                 self._use(old)
             self.ledger.log(agent, "rebuild_failed", f"{type(e).__name__}: {e}"[:2000], schema=new, record=culprit)
             raise RebuildFailed(str(e), culprit) from e
+        after = self.open_now()
         self.ledger.set_meta("projection_schema", new)
         self.ledger.set_meta("stale", "0")
         self.ledger.set_meta("stale_reason", "")
         if old:
             with self.conn.cursor() as c:
                 c.execute(f'DROP SCHEMA IF EXISTS "{old}" CASCADE')
+        self._record_changes(before, after, since, agent)
         self.ledger.log(agent, "rebuild", reason or None, schema=new)
         return new
 

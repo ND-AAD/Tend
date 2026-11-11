@@ -7,7 +7,9 @@ Nothing Tend read is hidden: besides what remains, the list shows requests close
 reading, requests the audit could not place, and messages the store had to set aside."""
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 from . import ids, instants, schema
 from .config import Config
@@ -27,6 +29,7 @@ class Brief:
     cutoff: str
     lines: list[Line] = field(default_factory=list)
     notices: list[str] = field(default_factory=list)
+    changed: set[str] = field(default_factory=set)      # claims a rewrite ended or moved, as shown
 
     def section(self, name: str) -> list[Line]:
         return [l for l in self.lines if l.section == name]
@@ -86,7 +89,7 @@ def quiet_days(ledger: Ledger, subject: str, cutoff: str, act: dict | None = Non
 
 
 OPEN_SECTIONS = ("Overdue", "Your commitments", "Waiting on others", "Coming up")
-SECTIONS = OPEN_SECTIONS + ("Closed on my best reading", "Could not place")
+SECTIONS = OPEN_SECTIONS + ("Changed by my re-checks", "Closed on my best reading", "Could not place")
 
 
 def _label(ledger: Ledger, item_id: str) -> str:
@@ -159,6 +162,7 @@ def build(session, ledger: Ledger, cfg: Config, cutoff: str = "now") -> Brief:
         brief.lines.append(Line(section, text, refs, claim_id))
     open_ids = {l.claim_id for l in brief.lines}
     _closed_on_best_reading(session, ledger, cfg, brief, open_ids)
+    _changed_by_rewrite(session, ledger, cfg, brief)
     _could_not_place(session, ledger, brief)
     brief.lines.sort(key=lambda l: (SECTIONS.index(l.section),
                                     0 if (ledger.claim(l.claim_id) and ledger.claim(l.claim_id).form == "ask") else 1,
@@ -179,30 +183,76 @@ def _grounded(session, ledger: Ledger, refs: list[str], what: str) -> bool:
 
 
 def _closed_on_best_reading(session, ledger: Ledger, cfg: Config, brief: Brief, open_ids: set[str]) -> None:
-    """A request no longer open only because a best-reading statement (flagged `low_confidence`)
-    said it was done. The closing is real in the store; the list says what it rests on."""
+    """A request no longer open only because best-reading statements (flagged `low_confidence`)
+    said it was done. The closing is real in the store; the list says what it rests on.
+
+    Starts from the flagged statements of the window, so its cost follows the guesses, not the
+    history; roots are read once."""
+    roots = ledger.roots()
+    root = lambda i: roots.get(i, i)
     pairs = ledger.message_claims()
+    end = instants.parse(brief.cutoff)[1]
+    guesses = [(s, sm) for s, sm in pairs if s.kind == "statement" and "low_confidence" in (s.flags or [])
+               and _recent(sm["sent_at"], brief.cutoff)]
+    if not guesses:
+        return
     withdrawn = {ledger.successor(c.value["claim"]) for c, _ in pairs if c.kind == "withdrawal"}
-    for c, m in pairs:
-        if c.kind != "commitment" or c.form != "value" or c.id in open_ids or c.id in withdrawn:
+    statements: dict[tuple, list] = {}
+    for s, sm in pairs:
+        if s.kind == "statement" and instants.parse(sm["sent_at"])[0] < end:
+            statements.setdefault((root(s.subject_id), s.property, json.dumps(s.value)), []).append((s, sm))
+    done = set()
+    for g, gm in guesses:
+        key = (root(g.subject_id), g.property, json.dumps(g.value))
+        for c, m in pairs:
+            if c.kind != "commitment" or c.form != "value" or c.id in open_ids or c.id in withdrawn or c.id in done \
+                    or (root(c.subject_id), c.property, json.dumps(c.value)) != key:
+                continue
+            closers = [(s, sm) for s, sm in statements.get(key, [])
+                       if instants.sort_key(sm["sent_at"]) >= instants.sort_key(m["sent_at"])]
+            if not closers or any("low_confidence" not in (s.flags or []) for s, _ in closers):
+                continue
+            done.add(c.id)
+            s, sm = min(closers, key=lambda x: instants.sort_key(x[1]["sent_at"]))
+            r = key[0]
+            refs = [f"{r}|{ids.expctx(c.id)}|{ids.elig(cfg.owner_for(c.obligated_id))}",
+                    f"{r}|{ids.event(sm['provider'], sm['provider_id'])}|{sm['stream_id']}"]
+            what = schema.task(_kind(ledger, r), c.property, c.value, c.form)
+            text = (f"{what[0].upper()}{what[1:]}: {_label(ledger, r)}, closed by \"{s.quote}\" from "
+                    f"{_person(ledger, sm['producer_id'], cfg)} (my best reading)")
+            if _grounded(session, ledger, refs, text):
+                brief.lines.append(Line("Closed on my best reading", text, refs, c.id))
+
+
+def _changed_by_rewrite(session, ledger: Ledger, cfg: Config, brief: Brief) -> None:
+    """SPEC §8.2: every open request a rewrite (re-check, correction, merge, set-aside record)
+    ended or moved, with what changed and why. Shown for RECENT_DAYS from the rewrite."""
+    now = datetime.now(timezone.utc)
+    latest: dict[str, dict] = {}
+    for r in ledger.revisions("obligation_changed"):
+        if (now - r["at"]).days < RECENT_DAYS:
+            latest[r["detail"]["claim"]] = r
+    for cid, r in latest.items():
+        d = r["detail"]
+        c = ledger.claim(d.get("now_claim") or cid) or ledger.claim(cid)
+        m = c and ledger.message(c.message_id)
+        if not m:
             continue
-        root = ledger.root(c.subject_id)
-        closers = [(s, sm) for s, sm in pairs if s.kind == "statement" and ledger.root(s.subject_id) == root
-                   and s.property == c.property and s.value == c.value
-                   and instants.sort_key(sm["sent_at"]) >= instants.sort_key(m["sent_at"])
-                   and instants.parse(sm["sent_at"])[0] < instants.parse(brief.cutoff)[1]]
-        if not closers or any("low_confidence" not in (s.flags or []) for s, _ in closers):
-            continue
-        s, sm = min(closers, key=lambda x: instants.sort_key(x[1]["sent_at"]))
-        if not _recent(sm["sent_at"], brief.cutoff):
-            continue
-        refs = [f"{root}|{ids.expctx(c.id)}|{ids.elig(cfg.owner_for(c.obligated_id))}",
-                f"{root}|{ids.event(sm['provider'], sm['provider_id'])}|{sm['stream_id']}"]
-        what = schema.task(_kind(ledger, root), c.property, c.value, c.form)
-        text = (f"{what[0].upper()}{what[1:]}: {_label(ledger, root)}, closed by \"{s.quote}\" from "
-                f"{_person(ledger, sm['producer_id'], cfg)} (my best reading)")
-        if _grounded(session, ledger, refs, text):
-            brief.lines.append(Line("Closed on my best reading", text, refs, c.id))
+        was = ledger.root(d["was_subject"])
+        what = schema.task(_kind(ledger, was), c.property, c.value, c.form)
+        who = f", asked by {_person(ledger, c.party_id, cfg)}" if c.party_id and c.party_id != cfg.owner_id else ""
+        if d["change"] == "moved":
+            text = (f"{what[0].upper()}{what[1:]}: {_label(ledger, ledger.root(d['now_subject']))} "
+                    f"(was {_label(ledger, was)}){who}; {r['reason']}")
+        else:
+            text = f"{what[0].upper()}{what[1:]}: {_label(ledger, was)}{who}, no longer open; {r['reason']}"
+        refs = [f"{m['stream_id']}|{ids.event(m['provider'], m['provider_id'])}|{m['stream_id']}"]
+        if session.read("exact", {"ref": refs[0]}).get("status") == "found":
+            brief.lines.append(Line("Changed by my re-checks", text, refs, c.id))
+        else:
+            # its message is not in the store (set aside): it cannot be grounded, so it is a note
+            brief.notices.append(text)
+        brief.changed.add(c.id)
 
 
 def _could_not_place(session, ledger: Ledger, brief: Brief) -> None:
@@ -216,7 +266,18 @@ def _could_not_place(session, ledger: Ledger, brief: Brief) -> None:
             continue
         seen.add(key)
         if d.get("code") == "quote_not_in_body":
-            continue          # the words are the extractor's, not the sender's: nothing to show
+            # the words are the extractor's, not the sender's: name the message, not the words
+            if d.get("claim_kind") == "commitment":
+                m = ledger.message(d["message"])
+                if m:
+                    refs = [f"{m['stream_id']}|{ids.event(m['provider'], m['provider_id'])}|{m['stream_id']}"]
+                    text = (f"A request from {m['producer_id'].split(':', 1)[-1]}, {m['sent_at'][:10]}, that I could "
+                            "not read reliably (the words I extracted are not in the message)")
+                    if _grounded(session, ledger, refs, text):
+                        brief.lines.append(Line("Could not place", text, refs, ""))
+            else:
+                statements += 1
+            continue
         if d.get("claim_kind") != "commitment":
             statements += 1
             continue

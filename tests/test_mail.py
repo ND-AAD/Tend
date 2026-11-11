@@ -158,7 +158,9 @@ def test_later_message_repoints_best_reading(app):
     assert c.subject_id == v2 and "low_confidence" not in c.flags
     assert app.ledger.claim(first).status == "superseded"
     lines = app.brief("2026-11-10T11:00-08:00").lines
-    assert len(lines) == 1 and lines[0].text.startswith("Deliver: Acme deck v2") and "best reading" not in lines[0].text
+    assert [l.section for l in lines] == ["Your commitments", "Changed by my re-checks"]
+    assert lines[0].text.startswith("Deliver: Acme deck v2") and "best reading" not in lines[0].text
+    assert lines[1].text.startswith("Deliver: Acme deck v2 (was Acme deck v1)")      # the move is shown
 
 
 def test_never_drops_a_request_with_a_colliding_name(app):
@@ -219,7 +221,7 @@ def test_model_failure_stores_nothing_and_retries(app):
 
 def test_review_queue_catches_a_confident_pick_made_doubtful(app):
     """Review finding A: a confident pick enters the review queue once its name is shared by a
-    second Item, and re-resolution rewrites it."""
+    second Item; the re-check flags it, and a later confident answer rewrites it."""
     ex = fakes.Extractor({
         "a": [proposal("statement", "The proposal is signed", [mention("the proposal", kind="document", label="Acme proposal")], "signed", True)],
         "b": [proposal("statement", "the proposal was sent", [mention("the proposal", kind="document")], "sent", True)],
@@ -237,7 +239,15 @@ def test_review_queue_catches_a_confident_pick_made_doubtful(app):
     assert b in ing.review_queue()
     birch = [i["id"] for i in app.ledger.active_items("document") if i["label"] == "Birch proposal"][0]
     target["id"] = birch
-    app.ledger.link("thread:gmail:t1", birch, "2026-11-10T10:30:00-08:00")   # structure now supports Birch
-    changed = ing.review()
+    # a shared name is ambiguity, not contrary evidence: the confident pick is not moved, it
+    # becomes a best reading and the list says so
+    assert b not in ing.review(sample=0)
+    assert app.ledger.claim(b).subject_id == a.subject_id and "low_confidence" in app.ledger.claim(b).flags
+    assert ing.review_queue() == []                                       # same evidence: not asked again
+    app.ledger.link("thread:gmail:t1", birch, "2026-11-10T10:30:00-08:00")   # new evidence: structure supports Birch
+    # a best reading may then be moved by a confident answer
+    changed = ing.review(sample=0)
     assert any(app.ledger.claim(x).subject_id == birch for x in changed)
     assert app.ledger.claim(b).status == "superseded"
+    assert app.ledger.claim(a.id).subject_id == a.subject_id        # the right Acme claim stays put
+
