@@ -47,7 +47,7 @@ def map_event(event_name: str, payload: dict, cfg: Config, ledger: Ledger) -> tu
         "producer_id": _person(cfg, sender), "recipients": [], "sent_at": _instant(when),
         "artifact": {"@ref": "artifact", "id": url or eid, "edition": when},
     }
-    ledger.ensure_item(subject, kind, obj.get("title"), keys=[subject, url.lower()] if url else [subject])
+    ledger.ensure_item(subject, kind, f"{obj.get('title')} ({repo.split('/')[-1]}#{n})", keys=[subject, url.lower()] if url else [subject])
     owner = cfg.owner_id
     claims: list[Claim] = []
 
@@ -74,20 +74,32 @@ def map_event(event_name: str, payload: dict, cfg: Config, ledger: Ledger) -> tu
             out.append(c)
         return out
 
-    def withdraw_all(prop: str | None = None) -> None:
+    def withdraw_all(prop: str | None = None, keep: str | None = None) -> None:
         for target in open_commitments(prop):
-            add("withdrawal", target.property, {"claim": target.id}, party_id=_person(cfg, sender))
+            if target.property != keep:
+                add("withdrawal", target.property, {"claim": target.id}, party_id=_person(cfg, sender))
+
+    def await_owner() -> None:
+        """A pull request you opened or were assigned waits on you to merge or close it."""
+        if not open_commitments("resolved"):
+            add("commitment", "resolved", True, obligated_id=owner, party_id=_person(cfg, sender))
 
     if action in ("opened", "reopened"):
         vals = {"state": "open", "title": obj["title"], "author": obj["user"]["login"]}
         if not is_pr and action == "reopened":
             vals["resolved"] = False
+        if is_pr:
+            vals["resolved"] = False
         for p, v in vals.items():
             add("statement", p, v)
+        if is_pr and _person(cfg, obj["user"]["login"]) == owner:
+            await_owner()
     elif action == "closed":
         if is_pr:
             add("statement", "state", "merged" if obj.get("merged") else "closed")
-            withdraw_all()       # nothing remains to review on a closed or merged pull request
+            add("statement", "resolved", True)
+            # nothing remains to review; your own close is the evidence for "merge or close"
+            withdraw_all(keep="resolved" if _person(cfg, sender) == owner else None)
         else:
             add("statement", "state", "closed")
             if _person(cfg, sender) == owner:
@@ -102,6 +114,11 @@ def map_event(event_name: str, payload: dict, cfg: Config, ledger: Ledger) -> tu
         withdraw_all("review_by_owner")
     elif event_name == "pull_request_review" and action == "submitted" and _person(cfg, sender) == owner:
         add("statement", "review_by_owner", "submitted")
+    elif event_name == "pull_request" and action == "assigned" and _person(cfg, payload["assignee"]["login"]) == owner:
+        await_owner()
+    elif event_name == "pull_request" and action == "unassigned" and _person(cfg, payload["assignee"]["login"]) == owner \
+            and _person(cfg, obj["user"]["login"]) != owner:
+        withdraw_all("resolved")
     elif event_name == "issues" and action == "assigned" and _person(cfg, payload["assignee"]["login"]) == owner:
         add("commitment", "resolved", True, obligated_id=owner, party_id=_person(cfg, sender))
     elif event_name == "issues" and action == "unassigned" and _person(cfg, payload["assignee"]["login"]) == owner:

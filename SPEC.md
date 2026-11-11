@@ -106,10 +106,12 @@ Deterministic, no model. Source is `ghlog:<repo>`; the self-description's `@prod
 |---|---|
 | PR opened / reopened | statement `(pr, E, log) {state: "open", title, author}` |
 | PR closed (merged / not merged) | statement `{state: "merged"}` / `{state: "closed"}` |
+| PR opened by the owner, or assigned to the owner | commitment: property `resolved`, value `true`, listed as "Merge or close". Agents open pull requests under the owner's account, so an open PR of the owner's is waiting on the owner (found on real activity, 2026-11-11). The opened statement carries `resolved: false` |
+| PR closed or merged by the owner | statement `{resolved: true}` fulfils it; other open commitments on the PR are withdrawn |
 | Review requested of the owner | commitment: obligated owner, party the requester, subject the PR, property `review_by_owner`, value `"submitted"`, no deadline |
 | Review submitted by the owner | statement `{review_by_owner: "submitted"}` |
 | Review request of the owner removed | withdraw of the open review commitment, recorded as a `withdraw` act sourced from the log with `@party` the actor |
-| PR closed or merged | withdraw of every open commitment of the owner on the PR, `@party` the actor |
+| PR closed or merged by someone else | statement `{resolved: true}`, and withdraw of every open commitment of the owner on the PR, `@party` the actor |
 | Issue unassigned from the owner | withdraw of the open `resolved` commitment |
 | Issue reopened | statement `{state: "open", resolved: false}` |
 | Issue assigned to the owner | commitment: property `resolved`, value `true` |

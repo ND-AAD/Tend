@@ -106,3 +106,18 @@ def test_evidence_before_setup_qualifies(app):
     _ing(app, "pull_request", pr_event("review_requested", at="2026-10-05T10:05:00Z", requested_reviewer={"login": "ND-AAD"}))
     _ing(app, "pull_request_review", review_submitted(at="2026-10-06T18:00:00Z"))
     assert _texts(app, "2026-11-11T09:00:00+00:00") == []
+
+
+def test_open_prs_of_yours_wait_on_you(app):
+    """Real-data finding (2026-11-11): agents open pull requests under the owner's account, so a
+    PR the owner opened or was assigned is waiting on the owner to merge or close it."""
+    from gh import pr_event
+    _ing(app, "pull_request", pr_event("opened", n=8, sender="nd-aad", author="nd-aad"))
+    _ing(app, "pull_request", pr_event("opened", n=9, sender="alice-dev"))
+    _ing(app, "pull_request", pr_event("assigned", n=9, at="2026-11-10T17:05:00Z", assignee={"login": "ND-AAD"}))
+    texts = _texts(app, "2026-11-11T09:00:00+00:00")
+    assert sorted(texts) == ["Merge or close: Add ledger (attedra#8)", "Merge or close: Add ledger (attedra#9), asked by gh:alice-dev"]
+    _ing(app, "pull_request", pr_event("closed", n=8, at="2026-11-11T12:00:00Z", sender="nd-aad", merged=True,
+                                       author="nd-aad"))
+    _ing(app, "pull_request", pr_event("closed", n=9, at="2026-11-11T12:00:00Z", sender="alice-dev", merged=True))
+    assert _texts(app, "2026-11-12T09:00:00+00:00") == []

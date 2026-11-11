@@ -33,7 +33,7 @@ def test_commitment_walkthrough(app):
     assert out.written and not out.held
     b = app.brief("2026-11-11T09:00-08:00")
     assert [l.section for l in b.lines] == ["Your commitments"]
-    assert "Acme deck (delivered: True), due 2026-11-13-08:00, asked by dana@acme.com" in b.lines[0].text
+    assert "Deliver: Acme deck, due 2026-11-13-08:00, asked by dana@acme.com" in b.lines[0].text
     # the extractor saw the new Item in the pack for the reply
     out2 = ing.ingest(mail("m2", "t1", NICK, [DANA], "2026-11-11T10:00:00-08:00",
                            "Here is the revised Acme deck.\n\nOn Tue, Dana wrote:\n> could you send me"))
@@ -158,7 +158,7 @@ def test_later_message_repoints_best_reading(app):
     assert c.subject_id == v2 and "low_confidence" not in c.flags
     assert app.ledger.claim(first).status == "superseded"
     lines = app.brief("2026-11-10T11:00-08:00").lines
-    assert len(lines) == 1 and lines[0].text.startswith("Acme deck v2") and "best reading" not in lines[0].text
+    assert len(lines) == 1 and lines[0].text.startswith("Deliver: Acme deck v2") and "best reading" not in lines[0].text
 
 
 def test_never_drops_a_request_with_a_colliding_name(app):
@@ -174,7 +174,7 @@ def test_never_drops_a_request_with_a_colliding_name(app):
                         "Hi Nick, could you review the proposal by Friday? Bo"))
     assert not b.refused and (b.written or b.held)
     lines = app.brief("2026-11-11T09:00-08:00").lines
-    assert len(lines) == 1 and lines[0].text.startswith("Birch proposal")
+    assert len(lines) == 1 and lines[0].text.startswith("Review: Birch proposal")
 
 
 def test_candidates_are_filtered_by_kind(app):

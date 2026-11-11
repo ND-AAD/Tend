@@ -47,6 +47,11 @@ def _label(ledger: Ledger, item_id: str) -> str:
     return (it and it["label"]) or item_id
 
 
+def _kind(ledger: Ledger, item_id: str) -> str:
+    it = ledger.item(ledger.root(item_id))
+    return it["kind"] if it else ""
+
+
 def _person(ledger: Ledger, pid: str | None, cfg: Config) -> str:
     if not pid:
         return "someone"
@@ -77,8 +82,9 @@ def build(session, ledger: Ledger, cfg: Config, cutoff: str = "now") -> Brief:
             ledger.log("brief", "ungrounded_line", "reference did not resolve", unit=unit, refs=refs)
             continue
         standing = e.get("standing", {})
-        what = f"answer: {schema.words(prop)}" if c.form == "ask" else f"{schema.words(prop)}: {c.value}"
-        text = f"{_label(ledger, subject)} ({what})"
+        what = schema.task(_kind(ledger, subject), prop, c.value, c.form)
+        label = _label(ledger, subject)
+        text = f"{what[0].upper()}{what[1:]}: {label}" if what in schema.TASKS.values() else f"{label} ({what})"
         if c.deadline:
             text += f", due {c.deadline}"
         if source == owner_elig:

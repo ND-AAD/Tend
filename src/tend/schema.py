@@ -12,7 +12,7 @@ PROPERTIES: dict[str, dict[str, str]] = {
     "question": {"answer": "str", "answered": "bool"},
     "document": {"reviewed": "bool", "sent": "bool", "signed": "bool", "version": "str"},
     "pr": {"state": "enum:open|closed|merged", "title": "str", "author": "str",
-           "review_by_owner": "enum:submitted", "merged": "bool"},
+           "review_by_owner": "enum:submitted", "merged": "bool", "resolved": "bool"},
     "issue": {"state": "enum:open|closed", "title": "str", "resolved": "bool"},
     "person": {"availability": "str", "role": "str"},
 }
@@ -35,3 +35,27 @@ def check_value(kind: str, prop: str, value) -> bool:
 
 def words(prop: str) -> str:
     return prop.replace("_", " ")
+
+
+TASKS: dict[tuple[str, str], str] = {
+    ("pr", "resolved"): "merge or close",
+    ("pr", "review_by_owner"): "review",
+    ("issue", "resolved"): "resolve",
+    ("deliverable", "delivered"): "deliver",
+    ("document", "reviewed"): "review",
+    ("document", "sent"): "send",
+    ("document", "signed"): "sign",
+    ("decision", "decided"): "decide",
+    ("question", "answer"): "answer",
+}
+
+
+def task(kind: str, prop: str, value, form: str = "value") -> str:
+    """The words a list line uses for what is expected."""
+    if form == "ask":
+        return f"answer: {words(prop)}"
+    if value is True and (kind, prop) in TASKS:
+        return TASKS[(kind, prop)]
+    if (kind, prop) in TASKS and prop == "review_by_owner":
+        return TASKS[(kind, prop)]
+    return f"{words(prop)}: {value}"
